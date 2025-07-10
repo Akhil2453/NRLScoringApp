@@ -163,6 +163,52 @@ def get_matches():
 
     return jsonify({'matches': match_list}), 200
 
+@app.route('/match/<int:match_id>/details', methods=['GET'])
+def get_match_details(match_id):
+    # Fetch match from DB
+    match = Match.query.get(match_id)
+
+    if not match:
+        return jsonify({'error': 'Match not found'}), 404
+
+    # Parse team strings into lists
+    red_teams = match.red_teams.split(',') if match.red_teams else []
+    blue_teams = match.blue_teams.split(',') if match.blue_teams else []
+
+    # Fetch any existing score entries
+    red_score = ScoreEntry.query.filter_by(match_id=match_id, alliance='red').first()
+    blue_score = ScoreEntry.query.filter_by(match_id=match_id, alliance='blue').first()
+
+    def serialize_score(score):
+        if not score:
+            return None
+        return {
+            "alliance_charge": score.alliance_charge,
+            "captured_charge": score.captured_charge,
+            "golden_charge_stack": score.golden_charge_stack,
+            "minor_penalties": score.minor_penalties,
+            "major_penalties": score.major_penalties,
+            "full_parking": score.full_parking,
+            "partial_parking": score.partial_parking,
+            "docked": score.docked,
+            "engaged": score.engaged,
+            "supercharge_mode": score.supercharge_mode,
+            "supercharge_end_time": score.supercharge_end_time,
+            "submitted_by": score.submitted_by,
+            "finalized_by": score.finalized_by
+        }
+
+    return jsonify({
+        "match_id": match.id,
+        "match_number": match.match_number,
+        "arena": match.arena,
+        "status": match.status,
+        "red_teams": red_teams,
+        "blue_teams": blue_teams,
+        "red_score": serialize_score(red_score),
+        "blue_score": serialize_score(blue_score)
+    }), 200
+
 
 # Step 8: Run server and auto-create DB tables if not present
 if __name__ == '__main__':
