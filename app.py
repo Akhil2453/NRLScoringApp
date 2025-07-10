@@ -4,6 +4,7 @@ from flask_cors import CORS                 # Handles CORS for frontend-backend 
 import hashlib                              # Used for secure password hashing
 import csv
 from io import StringIO
+from flask_socketio import SocketIO
 
 # Step 1: Initialize the Flask app
 app = Flask(__name__)
@@ -12,6 +13,8 @@ CORS(app)  # Enable CORS so that frontend (Flutter Web) can communicate with bac
 # Step 2: Configure SQLite database
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///nrl_scoring.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # Step 3: Initialize SQLAlchemy with the app
 db = SQLAlchemy(app)
@@ -214,6 +217,22 @@ def get_match_details(match_id):
         "blue_score": serialize_score(blue_score)
     }), 200
 
+def calculate_total_score(score):
+    base_points = 5
+    supercharge_bonus = 1 if score.supercharge_mode else 0
+
+    total = 0
+    total += score.alliance_charge * (base_points + supercharge_bonus)
+    total += score.captured_charge * 10
+    total += score.full_parking * 10
+    total += score.partial_parking * 5
+    total += score.docked * 15
+    total += score.engaged * 10
+    total -= score.minor_penalties * 5
+    total -= score.major_penalties * 15
+    return total
+
+
 @app.route('/score/<int:match_id>/<alliance>', methods=['POST'])
 def submit_score(match_id, alliance):
     if alliance not in ['red', 'blue']:
@@ -244,10 +263,37 @@ def submit_score(match_id, alliance):
     score.supercharge_end_time = data.get('supercharge_end_time', '')
     score.submitted_by = data.get('submitted_by', None)  # Referee user ID
 
+    # db.session.add(score)
+    # db.session.commit()
+
+    # return jsonify({'message': f'{alliance.title()} alliance score submitted successfully.'}), 200
     db.session.add(score)
     db.session.commit()
 
-    return jsonify({'message': f'{alliance.title()} alliance score submitted successfully.'}), 200
+    # Emit live score update
+    total_score = calculate_total_score(score)
+
+    socketio.emit('score_update', {
+        'match_id': match_id,
+        'alliance': alliance,
+        'score_breakdown': {
+            'alliance_charge': score.alliance_charge,
+            'captured_charge': score.captured_charge,
+            'full_parking': score.full_parking,
+            'partial_parking': score.partial_parking,
+            'docked': score.docked,
+            'engaged': score.engaged,
+            'minor_penalties': score.minor_penalties,
+            'major_penalties': score.major_penalties
+        },
+        'total_score': total_score,
+        'finalised': score.finalised
+    })
+
+    return jsonify({
+        'message': f'{alliance.title()} alliance score submitted successfully.',
+        'total_score': total_score
+    }), 200
 
 @app.route('/finalise_score', methods=['POST'])
 def finalise_score():
@@ -284,6 +330,112 @@ def finalise_score():
         'message': f'Match {match_id} scores finalised by Head Referee ID {confirmed_by}.'
     }), 200
 
+@app.route('/match/<int:match_id>/summary', methods=['GET'])
+def match_summary(match_id):
+    match = Match.query.get(match_id)
+    if not match:
+        return jsonify({'error': 'Match not found'}), 404
+
+    # Get teams
+    red_teams = match.red_teams.split(',') if match.red_teams else []
+    blue_teams = match.blue_teams.split(',') if match.blue_teams else []
+
+    # Get score entries
+    red_score = ScoreEntry.query.filter_by(match_id=match_id, alliance='red').first()
+    blue_score = ScoreEntry.query.filter_by(match_id=match_id, alliance='blue').first()
+
+    def serialize(score):
+        if not score:
+            return {
+                "score_breakdown": {},
+                "total_score": 0,
+                "finalised": False
+            }
+        return {
+            "score_breakdown": {
+                "alliance_charge": score.alliance_charge,
+                "captured_charge": score.captured_charge,
+                "golden_charge_stack": score.golden_charge_stack,
+                "minor_penalties": score.minor_penalties,
+                "major_penalties": score.major_penalties,
+                "full_parking": score.full_parking,
+                "partial_parking": score.partial_parking,
+                "docked": score.docked,
+                "engaged": score.engaged,
+                "supercharge_mode": score.supercharge_mode
+            },
+            "total_score": calculate_total_score(score),
+            "finalised": score.finalised
+        }
+
+    return jsonify({
+        "match_id": match.id,
+        "match_number": match.match_number,
+        "arena": match.arena,
+        "status": match.status,
+        "teams": {
+            "red": red_teams,
+            "blue": blue_teams
+        },
+        "score": {
+            "red": serialize(red_score),
+            "blue": serialize(blue_score)
+        }
+    }), 200
+
+# --- Real-Time Score Broadcasting (SocketIO) ---
+@app.route('/broadcast_score', methods=['POST'])
+def broadcast_score():
+    data = request.json
+    match_id = data.get('match_id')
+    alliance = data.get('alliance')
+    score = data.get('score')
+
+    if not match_id or not alliance or score is None:
+        return jsonify({'error': 'match_id, alliance, and score are required'}), 400
+
+    # Emit score update to all connected clients
+    socketio.emit('score_update', {
+        'match_id': match_id,
+        'alliance': alliance,
+        'score': score
+    })
+
+    return jsonify({'message': 'Score update broadcasted'}), 200
+
+# --- Inspection Status Update ---
+@app.route('/inspection/team_number/<string:team_number>', methods=['POST'])
+def update_inspection_by_team_number(team_number):
+    data = request.json
+    status = data.get('inspection_status')
+
+    if status not in ['passed', 'failed', 'pending']:
+        return jsonify({'error': 'Invalid inspection status'}), 400
+
+    team = Team.query.filter_by(name=team_number).first()
+    if not team:
+        return jsonify({'error': 'Team not found'}), 404
+
+    team.inspection_status = status
+    db.session.commit()
+
+    return jsonify({'message': f'Inspection status for team {team_number} updated to {status}'}), 200
+
+# --- Team Profile View ---
+@app.route('/team/profile/<string:team_number>', methods=['GET'])
+def view_team_profile_by_number(team_number):
+    team = Team.query.filter_by(name=team_number).first()
+
+    if not team:
+        return jsonify({'error': 'Team not found'}), 404
+
+    return jsonify({
+        'team_number': team.name,
+        'inspection_status': team.inspection_status,
+        'red_cards': team.red_cards,
+        'yellow_cards': team.yellow_cards
+    }), 200
+
 
 
 # Step 8: Run server and auto-create DB tables if not present
@@ -291,4 +443,5 @@ if __name__ == '__main__':
     with app.app_context():
         db.create_all()  # Automatically create tables based on models
 
-    app.run(debug=True)  # Start the Flask server on localhost:5000
+    socketio.run(app, host='0.0.0.0', port=5000)
+    # app.run(debug=True)  # Start the Flask server on localhost:5000
