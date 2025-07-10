@@ -209,6 +209,41 @@ def get_match_details(match_id):
         "blue_score": serialize_score(blue_score)
     }), 200
 
+@app.route('/score/<int:match_id>/<alliance>', methods=['POST'])
+def submit_score(match_id, alliance):
+    if alliance not in ['red', 'blue']:
+        return jsonify({'error': 'Alliance must be red or blue'}), 400
+
+    data = request.json
+    match = Match.query.get(match_id)
+
+    if not match:
+        return jsonify({'error': 'Match not found'}), 404
+
+    # Check if score already exists → update instead
+    score = ScoreEntry.query.filter_by(match_id=match_id, alliance=alliance).first()
+    if not score:
+        score = ScoreEntry(match_id=match_id, alliance=alliance)
+
+    # Assign fields from request
+    score.alliance_charge = data.get('alliance_charge', 0)
+    score.captured_charge = data.get('captured_charge', 0)
+    score.golden_charge_stack = data.get('golden_charge_stack', '')  # binary string or grid
+    score.minor_penalties = data.get('minor_penalties', 0)
+    score.major_penalties = data.get('major_penalties', 0)
+    score.full_parking = data.get('full_parking', 0)
+    score.partial_parking = data.get('partial_parking', 0)
+    score.docked = data.get('docked', 0)
+    score.engaged = data.get('engaged', 0)
+    score.supercharge_mode = data.get('supercharge_mode', False)
+    score.supercharge_end_time = data.get('supercharge_end_time', '')
+    score.submitted_by = data.get('submitted_by', None)  # Referee user ID
+
+    db.session.add(score)
+    db.session.commit()
+
+    return jsonify({'message': f'{alliance.title()} alliance score submitted successfully.'}), 200
+
 
 # Step 8: Run server and auto-create DB tables if not present
 if __name__ == '__main__':
