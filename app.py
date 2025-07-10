@@ -49,20 +49,25 @@ class Match(db.Model):
 class ScoreEntry(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     match_id = db.Column(db.Integer, db.ForeignKey('match.id'), nullable=False)
-    alliance = db.Column(db.String(10), nullable=False)  # red or blue
-    alliance_charge = db.Column(db.Integer, default=0)
-    captured_charge = db.Column(db.Integer, default=0)
-    golden_charge_stack = db.Column(db.String(50), default="")  # 4x4 status grid, e.g., "1100110011001100"
-    minor_penalties = db.Column(db.Integer, default=0)
-    major_penalties = db.Column(db.Integer, default=0)
-    full_parking = db.Column(db.Integer, default=0)
-    partial_parking = db.Column(db.Integer, default=0)
-    docked = db.Column(db.Integer, default=0)
-    engaged = db.Column(db.Integer, default=0)
+    alliance = db.Column(db.String(10), nullable=False)
+
+    # Scoring fields...
+    alliance_charge = db.Column(db.Integer)
+    captured_charge = db.Column(db.Integer)
+    golden_charge_stack = db.Column(db.Text)
+    minor_penalties = db.Column(db.Integer)
+    major_penalties = db.Column(db.Integer)
+    full_parking = db.Column(db.Integer)
+    partial_parking = db.Column(db.Integer)
+    docked = db.Column(db.Integer)
+    engaged = db.Column(db.Integer)
     supercharge_mode = db.Column(db.Boolean, default=False)
-    supercharge_end_time = db.Column(db.String(50), default="")
-    submitted_by = db.Column(db.Integer, db.ForeignKey('user.id'))
-    finalized_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    supercharge_end_time = db.Column(db.String)
+
+    submitted_by = db.Column(db.Integer)  # Referee user ID
+    finalised = db.Column(db.Boolean, default=False)
+    confirmed_by = db.Column(db.Integer)  # Head referee user ID
+
 
 
 # Step 6: API route to register a user (used by admin to add referees/head refs)
@@ -243,6 +248,42 @@ def submit_score(match_id, alliance):
     db.session.commit()
 
     return jsonify({'message': f'{alliance.title()} alliance score submitted successfully.'}), 200
+
+@app.route('/finalise_score', methods=['POST'])
+def finalise_score():
+    data = request.json
+    match_id = data.get('match_id')
+    confirmed_by = data.get('confirmed_by')
+
+    if not match_id or not confirmed_by:
+        return jsonify({'error': 'match_id and confirmed_by are required'}), 400
+
+    match = Match.query.get(match_id)
+    if not match:
+        return jsonify({'error': 'Match not found'}), 404
+
+    # Fetch scores
+    red_score = ScoreEntry.query.filter_by(match_id=match_id, alliance='red').first()
+    blue_score = ScoreEntry.query.filter_by(match_id=match_id, alliance='blue').first()
+
+    if not red_score or not blue_score:
+        return jsonify({'error': 'Scores for both alliances must be submitted before finalisation'}), 400
+
+    if red_score.finalised or blue_score.finalised:
+        return jsonify({'error': 'Score already finalised'}), 400
+
+    # Mark both as final
+    red_score.finalised = True
+    red_score.confirmed_by = confirmed_by
+    blue_score.finalised = True
+    blue_score.confirmed_by = confirmed_by
+
+    db.session.commit()
+
+    return jsonify({
+        'message': f'Match {match_id} scores finalised by Head Referee ID {confirmed_by}.'
+    }), 200
+
 
 
 # Step 8: Run server and auto-create DB tables if not present
