@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'screens/login_page.dart';
-import 'screens/home_page.dart';
+import 'screens/referee_home_page.dart';
 
 void main() {
   runApp(NRLScoringApp());
@@ -19,9 +19,9 @@ class NRLScoringApp extends StatelessWidget {
       routes: {
         '/home': (context) {
           final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>;
-          return HomePage(
+          return RefereeHomePage(
             username: args['username'] ?? '',
-            role: args['role'] ?? '',
+            // role: args['role'] ?? '',
           );
         },
       },
@@ -65,7 +65,7 @@ class _AuthCheckState extends State<AuthCheck> {
     }
 
     return _loggedIn
-        ? HomePage(username: _username, role: _role)
+        ? RefereeHomePage(username: _username)
         : LoginPage();
   }
 }
