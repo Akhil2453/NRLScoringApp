@@ -15,38 +15,45 @@ class _LoginPageState extends State<LoginPage> {
   bool _isLoading = false;
   String _errorMessage = '';
 
-  Future<void> login() async {
+    Future<void> login() async {
     setState(() {
-      _isLoading = true;
-      _errorMessage = '';
+        _isLoading = true;
+        _errorMessage = '';
     });
 
     final response = await http.post(
-    //   Uri.parse('http://<raspberry-pi-ip>:5000/login'), // replace IP
-      Uri.parse('http://localhost:5000/login'), // if using browser/emulator on same machine
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
+        Uri.parse('http://localhost:5000/login'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
         'username': _usernameController.text,
         'password': _passwordController.text,
-      }),
+        }),
     );
 
     setState(() {
-      _isLoading = false;
+        _isLoading = false;
     });
 
     if (response.statusCode == 200) {
-      final data = jsonDecode(response.body);
-      Navigator.pushReplacementNamed(context, '/home', arguments: {
-        'user_id': data['user_id'],
-        'role': data['role']
-      });
+        final data = jsonDecode(response.body);
+        final String username = _usernameController.text;
+        final String role = data['role'];
+
+        Navigator.pushReplacementNamed(
+        context,
+        "/home",
+        arguments: {
+            'username': username,
+            'role': role
+        },
+        );
     } else {
-      setState(() {
+        setState(() {
         _errorMessage = 'Invalid credentials. Please try again.';
-      });
+        });
     }
-  }
+    }
+
 
   @override
   Widget build(BuildContext context) {

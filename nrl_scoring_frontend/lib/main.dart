@@ -5,31 +5,37 @@ import 'screens/login_page.dart';
 import 'screens/home_page.dart';
 
 void main() {
-  runApp(NRLApp());
+  runApp(NRLScoringApp());
 }
 
-class NRLApp extends StatelessWidget {
+class NRLScoringApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'NRL Scoring App',
-      theme: ThemeData(
-        primarySwatch: Colors.blue,
-        useMaterial3: true,
-      ),
       debugShowCheckedModeBanner: false,
+      theme: ThemeData(primarySwatch: Colors.deepPurple),
       home: AuthCheck(),
+      routes: {
+        '/home': (context) {
+          final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>;
+          return HomePage(
+            username: args['username'] ?? '',
+            role: args['role'] ?? '',
+          );
+        },
+      },
     );
   }
 }
 
-// Widget that checks if user is already logged in
 class AuthCheck extends StatefulWidget {
   @override
   _AuthCheckState createState() => _AuthCheckState();
 }
 
 class _AuthCheckState extends State<AuthCheck> {
+  bool _isLoading = true;
   bool _loggedIn = false;
   late String _username;
   late String _role;
@@ -48,20 +54,9 @@ class _AuthCheckState extends State<AuthCheck> {
 
     setState(() {
       _loggedIn = token != null;
+      _isLoading = false;
     });
   }
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'NRL Scoring',
-      home: _loggedIn
-          ? HomePage(username: _username, role: _role)
-          : LoginPage(),
-    );
-  }
-}
-
 
   @override
   Widget build(BuildContext context) {
@@ -70,7 +65,7 @@ class _AuthCheckState extends State<AuthCheck> {
     }
 
     return _loggedIn
-    ? HomePage(username: _username ?? '', role: _role ?? '')
-    : LoginPage();
+        ? HomePage(username: _username, role: _role)
+        : LoginPage();
   }
 }
