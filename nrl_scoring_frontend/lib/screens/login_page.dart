@@ -23,7 +23,7 @@ class _LoginPageState extends State<LoginPage> {
 
     final response = await http.post(
     //   Uri.parse('http://<raspberry-pi-ip>:5000/login'), // replace IP
-      Uri.parse('http://localhost:5000/login') // if using browser/emulator on same machine
+      Uri.parse('http://localhost:5000/login'), // if using browser/emulator on same machine
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({
         'username': _usernameController.text,
