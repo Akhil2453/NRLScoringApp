@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify  # Core Flask modules for API creation
 from flask_sqlalchemy import SQLAlchemy     # ORM for SQLite database interaction
 from flask_cors import CORS                 # Handles CORS for frontend-backend communication
 import hashlib                              # Used for secure password hashing
+import csv
+from io import StringIO
 
 # Step 1: Initialize the Flask app
 app = Flask(__name__)
@@ -94,6 +96,54 @@ def login():
             'role': user.role
         }), 200
     return jsonify({'message': 'Invalid credentials'}), 401
+
+@app.route('/upload_schedule', methods=['POST'])
+def upload_schedule():
+    file = request.files['file']
+    if not file.filename.endswith('.csv'):
+        return jsonify({"error": "Invalid file format. Upload a CSV."}), 400
+
+    stream = StringIO(file.stream.read().decode("UTF8"), newline=None)
+    csv_input = csv.reader(stream)
+
+    # Skip header
+    headers = next(csv_input)
+
+    inserted_matches = []
+    inserted_teams = set()
+
+    for row in csv_input:
+        match_no = int(row[0])
+        red1 = row[1].strip()
+        red2 = row[2].strip()
+        blue1 = row[3].strip()
+        blue2 = row[4].strip()
+
+        # Add teams if not already in DB
+        for team_id in [red1, red2, blue1, blue2]:
+            if not Team.query.filter_by(name=team_id).first():
+                new_team = Team(name=team_id)
+                db.session.add(new_team)
+                inserted_teams.add(team_id)
+
+        # Add match
+        if not Match.query.filter_by(match_number=match_no).first():
+            new_match = Match(
+                match_number=match_no,
+                arena="Alpha",  # Default for now
+                red_teams=f"{red1},{red2}",
+                blue_teams=f"{blue1},{blue2}",
+                status="pending"
+            )
+            db.session.add(new_match)
+            inserted_matches.append(match_no)
+
+    db.session.commit()
+    return jsonify({
+        "message": "Schedule uploaded successfully",
+        "matches_added": inserted_matches,
+        "teams_added": list(inserted_teams)
+    }), 201
 
 # Step 8: Run server and auto-create DB tables if not present
 if __name__ == '__main__':
