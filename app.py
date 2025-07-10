@@ -145,6 +145,25 @@ def upload_schedule():
         "teams_added": list(inserted_teams)
     }), 201
 
+@app.route('/matches', methods=['GET'])
+def get_matches():
+    # Optional: filter by arena in the future
+    matches = Match.query.filter(Match.status != 'completed').all()
+
+    match_list = []
+    for match in matches:
+        match_list.append({
+            'match_id': match.id,
+            'match_number': match.match_number,
+            'arena': match.arena,
+            'red_teams': match.red_teams.split(','),
+            'blue_teams': match.blue_teams.split(','),
+            'status': match.status
+        })
+
+    return jsonify({'matches': match_list}), 200
+
+
 # Step 8: Run server and auto-create DB tables if not present
 if __name__ == '__main__':
     with app.app_context():
