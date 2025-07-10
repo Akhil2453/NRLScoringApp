@@ -12,6 +12,7 @@ class RefereeHomePage extends StatefulWidget {
 class _RefereeHomePageState extends State<RefereeHomePage> {
   String? selectedArena;
   String? selectedAlliance;
+  int? selectedMatchId;
   final TextEditingController _matchNumberController = TextEditingController();
 
   void _startMatch() {
@@ -23,12 +24,20 @@ class _RefereeHomePageState extends State<RefereeHomePage> {
     }
 
     // Navigate to the score entry page
-    Navigator.pushNamed(context, '/score_entry', arguments: {
-      'referee': widget.username,
-      'arena': selectedArena,
-      'match_number': int.parse(_matchNumberController.text),
-      'alliance': selectedAlliance
-    });
+    // Navigator.pushNamed(context, '/score_entry', arguments: {
+    //   'referee': widget.username,
+    //   'arena': selectedArena,
+    //   'match_number': int.parse(_matchNumberController.text),
+    //   'alliance': selectedAlliance
+    // });
+    Navigator.pushNamed(
+        context,
+        '/score',
+        arguments: {
+            'matchId': selectedMatchId,
+            'alliance': selectedAlliance,
+        },
+        );
   }
 
   @override
@@ -54,25 +63,43 @@ class _RefereeHomePageState extends State<RefereeHomePage> {
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: ['Alpha', 'Bravo'].map((arena) {
                     return ElevatedButton(
-                      onPressed: () => setState(() => selectedArena = arena),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: selectedArena == arena ? Colors.deepPurple : Colors.grey.shade300,
-                        foregroundColor: Colors.white,
-                      ),
-                      child: Text(arena),
+                      onPressed: () {
+                        if (selectedMatchId != null && selectedAlliance != null) {
+                        Navigator.pushNamed(
+                            context,
+                            '/score',
+                            arguments: {
+                            'matchId': selectedMatchId,
+                            'alliance': selectedAlliance,
+                            },
+                        );
+                        }
+                    },
+                    child: Text(arena),
                     );
                   }).toList(),
                 ),
                 const SizedBox(height: 20),
                 _buildLabelField('Match Number'),
-                TextField(
-                  controller: _matchNumberController,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
+                DropdownButtonFormField<int>(
+                value: selectedMatchId,
+                decoration: const InputDecoration(
                     border: OutlineInputBorder(),
-                    hintText: 'Enter Match Number',
-                  ),
+                    hintText: 'Select Match Number',
                 ),
+                items: [1, 2, 3, 4, 5, 6].map((int matchId) {
+                    return DropdownMenuItem<int>(
+                    value: matchId,
+                    child: Text('Match $matchId'),
+                    );
+                }).toList(),
+                onChanged: (int? newValue) {
+                    setState(() {
+                    selectedMatchId = newValue;
+                    });
+                },
+                ),
+
                 const SizedBox(height: 20),
                 _buildLabelField('Alliance'),
                 Row(

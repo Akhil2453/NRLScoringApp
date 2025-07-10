@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'screens/login_page.dart';
 import 'screens/referee_home_page.dart';
+import 'screens/scoring_page.dart'; // <-- Make sure this exists
 
 void main() {
   runApp(NRLScoringApp());
@@ -16,14 +17,29 @@ class NRLScoringApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(primarySwatch: Colors.deepPurple),
       home: AuthCheck(),
-      routes: {
-        '/home': (context) {
-          final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>;
-          return RefereeHomePage(
-            username: args['username'] ?? '',
-            // role: args['role'] ?? '',
+      onGenerateRoute: (settings) {
+        if (settings.name == '/home') {
+          final args = settings.arguments as Map<String, dynamic>;
+          return MaterialPageRoute(
+            builder: (_) => RefereeHomePage(
+              username: args['username'],
+              // role: args['role'], // Uncomment if you're using roles
+            ),
           );
-        },
+        }
+
+        if (settings.name == '/score') {
+          final args = settings.arguments as Map<String, dynamic>;
+          return MaterialPageRoute(
+            builder: (_) => ScoringPage(
+              matchId: args['matchId'],
+              alliance: args['alliance'],
+            ),
+          );
+        }
+
+        // Fallback route if nothing matches
+        return MaterialPageRoute(builder: (_) => LoginPage());
       },
     );
   }
