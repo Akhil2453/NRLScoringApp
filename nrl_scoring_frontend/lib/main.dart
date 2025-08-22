@@ -3,7 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'screens/login_page.dart';
 import 'screens/referee_home_page.dart';
-import 'screens/scoring_page.dart'; // <-- Make sure this exists
+import 'screens/scoring_page.dart';
 
 void main() {
   runApp(NRLScoringApp());
@@ -29,17 +29,18 @@ class NRLScoringApp extends StatelessWidget {
         }
 
         if (settings.name == '/score') {
+          // ✅ Use settings.arguments, and return a MaterialPageRoute
           final args = settings.arguments as Map<String, dynamic>;
           return MaterialPageRoute(
             builder: (_) => ScoringPage(
-              matchId: args['matchId'],
-              alliance: args['alliance'],
+              matchId: args['matchId'] as int,
+              alliance: (args['alliance'] as String).toLowerCase(), // 'red' or 'blue'
             ),
           );
         }
 
         // Fallback route if nothing matches
-        return MaterialPageRoute(builder: (_) => LoginPage());
+        return MaterialPageRoute(builder: (_) => const LoginPage());
       },
     );
   }
@@ -77,11 +78,11 @@ class _AuthCheckState extends State<AuthCheck> {
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
-      return Scaffold(body: Center(child: CircularProgressIndicator()));
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
     return _loggedIn
         ? RefereeHomePage(username: _username)
-        : LoginPage();
+        : const LoginPage();
   }
 }
