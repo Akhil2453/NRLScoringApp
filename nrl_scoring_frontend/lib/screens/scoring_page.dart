@@ -1,85 +1,65 @@
 import 'package:flutter/material.dart';
 
-class ScoringPage extends StatefulWidget {
-  final int matchId;
-  final String alliance; // 'red' or 'blue'
-  const ScoringPage({required this.matchId, required this.alliance, Key? key}) : super(key: key);
-
-  @override
-  State<ScoringPage> createState() => _ScoringPageState();
-}
-
-class _ScoringPageState extends State<ScoringPage> {
-  int totalScore = 0;
-  int chargeScore = 0;
-  int capturedCharge = 0;
-
-  void incrementScore(int points) {
-    setState(() {
-      totalScore += points;
-    });
-  }
-
-  void decrementScore(int points) {
-    setState(() {
-      if (totalScore >= points) totalScore -= points;
-    });
-  }
-
-  void toggleCapturedCharge() {
-    setState(() {
-      capturedCharge = capturedCharge == 0 ? 1 : 0;
-    });
-  }
-
-  void submitScore() {
-    // TODO: Call Flask API to submit final score
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Score submitted')),
-    );
-  }
+class ScoringPage extends StatelessWidget {
+  const ScoringPage({Key? key}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
+    // Extract arguments from route
+    final Map<String, dynamic> args =
+        ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>;
+
+    final int matchId = args['matchId'] ?? -1;
+    final String alliance = args['alliance'] ?? 'unknown';
+
     return Scaffold(
       appBar: AppBar(
-        title: Text('Scoring - Match ${widget.matchId} (${widget.alliance.toUpperCase()})'),
+        title: const Text('Match Scoring'),
+        centerTitle: true,
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
           children: [
-            Text("Total Score: $totalScore", style: TextStyle(fontSize: 24)),
+            _buildMatchInfo(matchId, alliance),
             const SizedBox(height: 20),
 
-            ElevatedButton(
-              onPressed: () => incrementScore(5),
-              child: const Text('Add 5 Points'),
-            ),
-            ElevatedButton(
-              onPressed: () => decrementScore(5),
-              child: const Text('Subtract 5 Points'),
-            ),
-            const SizedBox(height: 20),
-
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text('Captured Charge:'),
-                Switch(
-                  value: capturedCharge == 1,
-                  onChanged: (value) => toggleCapturedCharge(),
-                ),
-              ],
-            ),
-            const Spacer(),
-            ElevatedButton(
-              onPressed: submitScore,
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
-              child: const Text('Submit Score'),
-            ),
+            // TODO: Add actual scoring widgets below
+            const Text("Scoring Interface Coming Soon..."),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildMatchInfo(int matchId, String alliance) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+      children: [
+        _infoTile("Match ID", matchId.toString()),
+        _infoTile("Alliance", alliance.toUpperCase()),
+      ],
+    );
+  }
+
+  Widget _infoTile(String title, String value) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade200,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.black26),
+      ),
+      child: Column(
+        children: [
+          Text(title,
+              style: const TextStyle(
+                  fontWeight: FontWeight.bold, fontSize: 16)),
+          const SizedBox(height: 4),
+          Text(value,
+              style: const TextStyle(
+                  fontSize: 18, color: Colors.deepPurple)),
+        ],
       ),
     );
   }
