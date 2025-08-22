@@ -5,6 +5,7 @@ from flask_socketio import SocketIO
 import hashlib
 import csv
 from io import StringIO
+import json
 
 # -----------------------------
 # Flask & extensions
@@ -238,13 +239,40 @@ def get_match_details(match_id):
         "blue_score": serialize_score(blue_score)
     }), 200
 
+
+def golden_points_from_grid(grid):
+    """
+    grid: list[list[bool]] top->bottom (row 0 is top, last row is bottom)
+    Rule per column:
+      - You can only stack contiguously from the bottom.
+      - Points for height h in a column: sum_{k=0}^{h-1} (10 + 5*k)
+    """
+    if not isinstance(grid, list):
+        return 0
+
+    rows = len(grid)
+    cols = len(grid[0]) if rows else 0
+    total = 0
+
+    for c in range(cols):
+        # contiguous height from bottom
+        h = 0
+        for r in range(rows - 1, -1, -1):
+            cell = grid[r][c]
+            if cell:
+                h += 1
+            else:
+                break
+        total += 10 * h + 5 * (h * (h - 1) // 2)
+
+    return total
+
 # -----------------------------
 # Scoring logic
 # -----------------------------
-def calculate_total_score(score: ScoreEntry) -> int:
-    # Example values (adjust per your Points Table)
+def calculate_total_score(score):
     base_points = 5
-    supercharge_bonus = 1 if score.supercharge_mode else 0
+    supercharge_bonus = 1 if getattr(score, 'supercharge_mode', False) else 0
 
     total = 0
     total += (score.alliance_charge or 0) * (base_points + supercharge_bonus)
@@ -255,7 +283,21 @@ def calculate_total_score(score: ScoreEntry) -> int:
     total += (score.engaged or 0) * 10
     total -= (score.minor_penalties or 0) * 5
     total -= (score.major_penalties or 0) * 15
-    return int(total)
+
+    # Golden stack points from JSON grid
+    golden_points = 0
+    try:
+        if score.golden_charge_stack:
+            grid = json.loads(score.golden_charge_stack)
+            golden_points = golden_points_from_grid(grid)
+    except Exception:
+        golden_points = 0
+
+    total += golden_points
+    return total
+
+
+
 
 @app.route('/score/<int:match_id>/<alliance>', methods=['POST'])
 def submit_score(match_id, alliance):

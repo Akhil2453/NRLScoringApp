@@ -59,6 +59,54 @@ class _ScoringPageState extends State<ScoringPage> {
   bool _loadingDetails = true;
   bool _submitting = false;
 
+  // --- Golden constants ---
+static const int kGoldenBase = 10;        // 10 per block
+static const int kGoldenStackBonus = 5;   // +5 per level above bottom
+
+/// Returns contiguous height from the bottom for a column c.
+/// Our grid indexes 0..goldRows-1 top->bottom. Bottom row = goldRows-1.
+int _columnHeight(int c) {
+  int h = 0;
+  for (int r = goldRows - 1; r >= 0; r--) {
+    if (goldenGrid[r][c]) {
+      h++;
+    } else {
+      break; // stop at first empty seen from bottom
+    }
+  }
+  return h;
+}
+
+/// The next placeable row index in column c (the lowest empty).
+int _nextPlaceableRow(int c) {
+  int h = _columnHeight(c);
+  return (goldRows - 1) - h;
+}
+
+/// Can place a block at (r,c)? Only if it's exactly the next placeable cell.
+bool _canPlaceAt(int r, int c) {
+  return !goldenGrid[r][c] && r == _nextPlaceableRow(c);
+}
+
+/// Can remove a block at (r,c)? Only the topmost filled cell can be removed.
+bool _canRemoveAt(int r, int c) {
+  final h = _columnHeight(c);
+  // topmost filled row index = (goldRows - h)
+  return goldenGrid[r][c] && r == (goldRows - h);
+}
+
+/// Total golden points using the stacking rule:
+/// For a column height h: sum_{k=0}^{h-1} (10 + 5*k) = 10h + 5*h*(h-1)/2
+int _goldenPoints() {
+  int pts = 0;
+  for (int c = 0; c < goldCols; c++) {
+    final h = _columnHeight(c);
+    pts += kGoldenBase * h + kGoldenStackBonus * ((h * (h - 1)) ~/ 2);
+  }
+  return pts;
+}
+
+
   @override
   void initState() {
     super.initState();
@@ -128,10 +176,8 @@ class _ScoringPageState extends State<ScoringPage> {
   int _previewTotal() {
     final parkingPoints =
         (fullParking ? kFullParking : 0) + (partialParking ? kPartialParking : 0);
-    // Note: golden scoring rules can be more complex; here we just show count
-    // and rely on backend for any extra stack bonuses. For preview, count * 0.
-    // If you want to preview points, wire them here accordingly.
-    final goldenPoints = 0;
+
+    final goldenPoints = _goldenPoints();
 
     final total = (allianceCharge * _allianceChargePerPress()) +
         (capturedCharge * kCapturedCharge) +
@@ -144,6 +190,7 @@ class _ScoringPageState extends State<ScoringPage> {
 
     return total;
   }
+
 
   // --- Supercharge behaviour ---
   void _toggleSupercharge() {
@@ -202,46 +249,49 @@ class _ScoringPageState extends State<ScoringPage> {
   }
 
   // --- Submit score to backend ---
-  Future<void> _submitScore() async {
-    setState(() => _submitting = true);
-    try {
-      final body = {
-        'alliance_charge': allianceCharge,
-        'captured_charge': capturedCharge,
-        'golden_charge_stack': jsonEncode(goldenGrid),
-        'minor_penalties': minorPenalties,
-        'major_penalties': majorPenalties,
-        'full_parking': fullParking ? 1 : 0,
-        'partial_parking': partialParking ? 1 : 0,
-        'docked': docked,
-        'engaged': engaged,
-        'supercharge_mode': superchargeActive, // will be false after timer anyway
-        'supercharge_end_time': superchargeActive ? DateTime.now().toIso8601String() : '',
-        'submitted_by': null, // wire real user id if you store it client-side
-      };
+Future<void> _submitScore() async {
+  setState(() => _submitting = true);
+  try {
+    final body = {
+      'alliance_charge': allianceCharge,
+      'captured_charge': capturedCharge,
+      'golden_charge_stack': jsonEncode(goldenGrid),
+      'minor_penalties': minorPenalties,
+      'major_penalties': majorPenalties,
+      'full_parking': fullParking ? 1 : 0,
+      'partial_parking': partialParking ? 1 : 0,
+      'docked': docked,
+      'engaged': engaged,
+      'supercharge_mode': superchargeActive,
+      'supercharge_end_time':
+          superchargeActive ? DateTime.now().toIso8601String() : '',
+      'submitted_by': null, // wire real user id if available
+    };
 
-      final url = Uri.parse('$baseUrl/score/${widget.matchId}/${widget.alliance}');
-      final res = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(body),
-      );
+    final url =
+        Uri.parse('$baseUrl/score/${widget.matchId}/${widget.alliance}');
+    final res = await http.post(
+      url,
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(body),
+    );
 
-      if (res.statusCode == 200) {
-        _showSnack('Score submitted.');
-        setState(() {
-          // After submit: enable end-of-match adjustments (only captured negative)
-          matchEnded = true;
-        });
-      } else {
-        _showSnack('Submit failed (${res.statusCode}).');
-      }
-    } catch (e) {
-      _showSnack('Network error while submitting score.');
-    } finally {
-      setState(() => _submitting = false);
+    if (res.statusCode == 200) {
+      // Allow end-of-match negative captured adjustment if you return
+      setState(() => matchEnded = true);
+
+      // Go straight to Match Summary
+      _goToSummary();
+    } else {
+      _showSnack('Submit failed (${res.statusCode}).');
     }
+  } catch (e) {
+    _showSnack('Network error while submitting score.');
+  } finally {
+    setState(() => _submitting = false);
   }
+}
+
 
   void _showSnack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
@@ -343,26 +393,36 @@ class _ScoringPageState extends State<ScoringPage> {
                       child: InkWell(
                         onTap: () {
                           setState(() {
-                            goldenGrid[r][c] = !goldenGrid[r][c];
+                            if (_canPlaceAt(r, c)) {
+                              // place the next block
+                              goldenGrid[r][c] = true;
+                            } else if (_canRemoveAt(r, c)) {
+                              // remove only the topmost filled
+                              goldenGrid[r][c] = false;
+                            } else {
+                              _showSnack('Place from bottom up • Remove from top down in each column.');
+                            }
                           });
                         },
                         child: Container(
                           width: 28,
                           height: 28,
                           decoration: BoxDecoration(
-                            color: selected ? Colors.amber : Colors.grey.shade300,
+                            color: goldenGrid[r][c]
+                                ? Colors.amber
+                                : (_canPlaceAt(r, c) ? Colors.amber.shade100 : Colors.grey.shade300),
                             borderRadius: BorderRadius.circular(4),
                             border: Border.all(color: Colors.grey.shade500),
                           ),
                         ),
-                      ),
+                      )
                     );
                   }),
                 );
               }),
             ),
             const SizedBox(height: 8),
-            Text('Stacked: ${_goldenCount()} (preview points shown in Total do not include stack bonuses)'),
+            Text('Blocks: ${_goldenCount()}  •  Golden Points: ${_goldenPoints()}'),
           ],
         ),
       ),
@@ -404,6 +464,19 @@ class _ScoringPageState extends State<ScoringPage> {
       ),
     );
   }
+
+  void _goToSummary() {
+  Navigator.pushNamed(
+    context,
+    '/summary',
+    arguments: {
+      'matchId': widget.matchId,
+      'arena': null,                 // pass real arena if you have it
+      'alliance': widget.alliance,   // 'red' or 'blue' (optional context)
+    },
+  );
+}
+
 
   @override
   Widget build(BuildContext context) {

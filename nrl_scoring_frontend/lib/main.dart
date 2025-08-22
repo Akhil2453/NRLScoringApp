@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'screens/login_page.dart';
 import 'screens/referee_home_page.dart';
 import 'screens/scoring_page.dart';
+import 'screens/match_summary_page.dart'; 
 
 void main() {
   runApp(NRLScoringApp());
@@ -38,6 +39,18 @@ class NRLScoringApp extends StatelessWidget {
             ),
           );
         }
+
+        if (settings.name == '/summary') {
+          final args = settings.arguments as Map<String, dynamic>;
+          return MaterialPageRoute(
+            builder: (_) => MatchSummaryPage(
+              matchId: args['matchId'] as int,
+              arena: args['arena'] as String?,
+              alliance: args['alliance'] as String?,
+            ),
+          );
+        }
+
 
         // Fallback route if nothing matches
         return MaterialPageRoute(builder: (_) => const LoginPage());
