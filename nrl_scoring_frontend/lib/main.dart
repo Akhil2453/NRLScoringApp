@@ -4,7 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'screens/login_page.dart';
 import 'screens/referee_home_page.dart';
 import 'screens/scoring_page.dart';
-import 'screens/match_summary_page.dart'; 
+import 'screens/match_summary_page.dart';
 
 void main() {
   runApp(NRLScoringApp());
@@ -18,42 +18,41 @@ class NRLScoringApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(primarySwatch: Colors.deepPurple),
       home: AuthCheck(),
+
+      // Important: return Route objects, not Widgets directly
       onGenerateRoute: (settings) {
         if (settings.name == '/home') {
-          final args = settings.arguments as Map<String, dynamic>;
+          final args = settings.arguments as Map<String, dynamic>? ?? {};
           return MaterialPageRoute(
             builder: (_) => RefereeHomePage(
-              username: args['username'],
-              // role: args['role'], // Uncomment if you're using roles
+              username: args['username'] as String? ?? '',
+              // role: args['role'], // if needed
             ),
           );
         }
 
         if (settings.name == '/score') {
-          // ✅ Use settings.arguments, and return a MaterialPageRoute
           final args = settings.arguments as Map<String, dynamic>;
           return MaterialPageRoute(
             builder: (_) => ScoringPage(
               matchId: args['matchId'] as int,
-              alliance: (args['alliance'] as String).toLowerCase(), // 'red' or 'blue'
+              alliance: (args['alliance'] as String).toLowerCase(), // 'red'|'blue'
             ),
           );
         }
 
+        // NEW: Match summary route
         if (settings.name == '/summary') {
           final args = settings.arguments as Map<String, dynamic>;
           return MaterialPageRoute(
             builder: (_) => MatchSummaryPage(
               matchId: args['matchId'] as int,
-              arena: args['arena'] as String?,
-              alliance: args['alliance'] as String?,
             ),
           );
         }
 
-
-        // Fallback route if nothing matches
-        return MaterialPageRoute(builder: (_) => const LoginPage());
+        // Fallback
+        return MaterialPageRoute(builder: (_) => LoginPage());
       },
     );
   }
@@ -91,11 +90,11 @@ class _AuthCheckState extends State<AuthCheck> {
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
     return _loggedIn
         ? RefereeHomePage(username: _username)
-        : const LoginPage();
+        : LoginPage();
   }
 }

@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 /// ScoringPage
-/// Expects to be navigated with:
 /// Navigator.pushNamed(context, '/score', arguments: {
 ///   'matchId': <int>,
 ///   'alliance': 'red' | 'blue',
@@ -60,61 +59,49 @@ class _ScoringPageState extends State<ScoringPage> {
   bool _submitting = false;
 
   // --- Golden constants ---
-static const int kGoldenBase = 10;        // 10 per block
-static const int kGoldenStackBonus = 5;   // +5 per level above bottom
+  static const int kGoldenBase = 10;        // 10 per block
+  static const int kGoldenStackBonus = 5;   // +5 per level above bottom
 
-/// Returns contiguous height from the bottom for a column c.
-/// Our grid indexes 0..goldRows-1 top->bottom. Bottom row = goldRows-1.
-int _columnHeight(int c) {
-  int h = 0;
-  for (int r = goldRows - 1; r >= 0; r--) {
-    if (goldenGrid[r][c]) {
-      h++;
-    } else {
-      break; // stop at first empty seen from bottom
+  /// Returns contiguous height from the bottom for a column c.
+  int _columnHeight(int c) {
+    int h = 0;
+    for (int r = goldRows - 1; r >= 0; r--) {
+      if (goldenGrid[r][c]) {
+        h++;
+      } else {
+        break;
+      }
     }
+    return h;
   }
-  return h;
-}
 
-/// The next placeable row index in column c (the lowest empty).
-int _nextPlaceableRow(int c) {
-  int h = _columnHeight(c);
-  return (goldRows - 1) - h;
-}
+  /// The next placeable row index in column c (the lowest empty).
+  int _nextPlaceableRow(int c) {
+    int h = _columnHeight(c);
+    return (goldRows - 1) - h;
+  }
 
-/// Can place a block at (r,c)? Only if it's exactly the next placeable cell.
-bool _canPlaceAt(int r, int c) {
-  return !goldenGrid[r][c] && r == _nextPlaceableRow(c);
-}
-
-/// Can remove a block at (r,c)? Only the topmost filled cell can be removed.
-bool _canRemoveAt(int r, int c) {
-  final h = _columnHeight(c);
-  // topmost filled row index = (goldRows - h)
-  return goldenGrid[r][c] && r == (goldRows - h);
-}
-
-/// Total golden points using the stacking rule:
-/// For a column height h: sum_{k=0}^{h-1} (10 + 5*k) = 10h + 5*h*(h-1)/2
-int _goldenPoints() {
-  int pts = 0;
-  for (int c = 0; c < goldCols; c++) {
+  /// Place only the next placeable; remove only the topmost filled.
+  bool _canPlaceAt(int r, int c) => !goldenGrid[r][c] && r == _nextPlaceableRow(c);
+  bool _canRemoveAt(int r, int c) {
     final h = _columnHeight(c);
-    pts += kGoldenBase * h + kGoldenStackBonus * ((h * (h - 1)) ~/ 2);
+    return goldenGrid[r][c] && r == (goldRows - h);
   }
-  return pts;
-}
 
+  /// Total golden points using stacking rule
+  int _goldenPoints() {
+    int pts = 0;
+    for (int c = 0; c < goldCols; c++) {
+      final h = _columnHeight(c);
+      pts += kGoldenBase * h + kGoldenStackBonus * ((h * (h - 1)) ~/ 2);
+    }
+    return pts;
+  }
 
   @override
   void initState() {
     super.initState();
-    // init golden grid
-    goldenGrid = List.generate(
-      goldRows,
-      (_) => List.generate(goldCols, (_) => false),
-    );
+    goldenGrid = List.generate(goldRows, (_) => List.generate(goldCols, (_) => false));
     _loadMatchDetails();
   }
 
@@ -127,9 +114,7 @@ int _goldenPoints() {
   Future<void> _loadMatchDetails() async {
     setState(() => _loadingDetails = true);
     try {
-      final res = await http.get(
-        Uri.parse('$baseUrl/match/${widget.matchId}/details'),
-      );
+      final res = await http.get(Uri.parse('$baseUrl/match/${widget.matchId}/details'));
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
         setState(() {
@@ -168,17 +153,13 @@ int _goldenPoints() {
     return c;
   }
 
-  int _allianceChargePerPress() {
-    // while supercharge is active, alliance charge +1 bonus
-    return superchargeActive ? (kAllianceChargeBase + 1) : kAllianceChargeBase;
-  }
+  int _allianceChargePerPress() =>
+      superchargeActive ? (kAllianceChargeBase + 1) : kAllianceChargeBase;
 
   int _previewTotal() {
     final parkingPoints =
         (fullParking ? kFullParking : 0) + (partialParking ? kPartialParking : 0);
-
     final goldenPoints = _goldenPoints();
-
     final total = (allianceCharge * _allianceChargePerPress()) +
         (capturedCharge * kCapturedCharge) +
         (docked * kDock) +
@@ -187,10 +168,8 @@ int _goldenPoints() {
         goldenPoints +
         (minorPenalties * kMinorPenalty) +
         (majorPenalties * kMajorPenalty);
-
     return total;
   }
-
 
   // --- Supercharge behaviour ---
   void _toggleSupercharge() {
@@ -242,56 +221,57 @@ int _goldenPoints() {
         superchargeActive = false;
         superchargeSecondsLeft = 0;
         matchEnded = false;
-        goldenGrid =
-            List.generate(goldRows, (_) => List.generate(goldCols, (_) => false));
+        goldenGrid = List.generate(goldRows, (_) => List.generate(goldCols, (_) => false));
       });
     }
   }
 
-  // --- Submit score to backend ---
-Future<void> _submitScore() async {
-  setState(() => _submitting = true);
-  try {
-    final body = {
-      'alliance_charge': allianceCharge,
-      'captured_charge': capturedCharge,
-      'golden_charge_stack': jsonEncode(goldenGrid),
-      'minor_penalties': minorPenalties,
-      'major_penalties': majorPenalties,
-      'full_parking': fullParking ? 1 : 0,
-      'partial_parking': partialParking ? 1 : 0,
-      'docked': docked,
-      'engaged': engaged,
-      'supercharge_mode': superchargeActive,
-      'supercharge_end_time':
-          superchargeActive ? DateTime.now().toIso8601String() : '',
-      'submitted_by': null, // wire real user id if available
-    };
-
-    final url =
-        Uri.parse('$baseUrl/score/${widget.matchId}/${widget.alliance}');
-    final res = await http.post(
-      url,
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(body),
-    );
-
-    if (res.statusCode == 200) {
-      // Allow end-of-match negative captured adjustment if you return
-      setState(() => matchEnded = true);
-
-      // Go straight to Match Summary
-      _goToSummary();
-    } else {
-      _showSnack('Submit failed (${res.statusCode}).');
-    }
-  } catch (e) {
-    _showSnack('Network error while submitting score.');
-  } finally {
-    setState(() => _submitting = false);
+  // --- NAV: go to summary ---
+  void _goToSummary() {
+    Navigator.pushReplacementNamed(context, '/summary', arguments: {
+      'matchId': widget.matchId,
+    });
   }
-}
 
+  // --- Submit score to backend ---
+  Future<void> _submitScore() async {
+    setState(() => _submitting = true);
+    try {
+      final body = {
+        'alliance_charge': allianceCharge,
+        'captured_charge': capturedCharge,
+        'golden_charge_stack': jsonEncode(goldenGrid),
+        'minor_penalties': minorPenalties,
+        'major_penalties': majorPenalties,
+        'full_parking': fullParking ? 1 : 0,
+        'partial_parking': partialParking ? 1 : 0,
+        'docked': docked,
+        'engaged': engaged,
+        'supercharge_mode': superchargeActive,
+        'supercharge_end_time':
+            superchargeActive ? DateTime.now().toIso8601String() : '',
+        'submitted_by': null, // wire real user id if available
+      };
+
+      final url = Uri.parse('$baseUrl/score/${widget.matchId}/${widget.alliance}');
+      final res = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(body),
+      );
+
+      if (res.statusCode == 200) {
+        setState(() => matchEnded = true);
+        _goToSummary(); // navigate after submit
+      } else {
+        _showSnack('Submit failed (${res.statusCode}).');
+      }
+    } catch (e) {
+      _showSnack('Network error while submitting score.');
+    } finally {
+      setState(() => _submitting = false);
+    }
+  }
 
   void _showSnack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
@@ -387,17 +367,14 @@ Future<void> _submitScore() async {
                 return Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: List.generate(goldCols, (c) {
-                    final selected = goldenGrid[r][c];
                     return Padding(
                       padding: const EdgeInsets.all(6.0),
                       child: InkWell(
                         onTap: () {
                           setState(() {
                             if (_canPlaceAt(r, c)) {
-                              // place the next block
                               goldenGrid[r][c] = true;
                             } else if (_canRemoveAt(r, c)) {
-                              // remove only the topmost filled
                               goldenGrid[r][c] = false;
                             } else {
                               _showSnack('Place from bottom up • Remove from top down in each column.');
@@ -415,7 +392,7 @@ Future<void> _submitScore() async {
                             border: Border.all(color: Colors.grey.shade500),
                           ),
                         ),
-                      )
+                      ),
                     );
                   }),
                 );
@@ -433,50 +410,69 @@ Future<void> _submitScore() async {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('Supercharge Mode', style: TextStyle(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            Row(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final compact = constraints.maxWidth < 460;
+            final statusText = superchargeActive
+                ? 'ACTIVE: ${superchargeSecondsLeft}s left (Alliance Charge +1; Captured enabled)'
+                : 'Inactive';
+            final statusStyle = TextStyle(
+              color: superchargeActive ? Colors.green.shade700 : Colors.grey.shade700,
+              fontWeight: FontWeight.w600,
+            );
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                ElevatedButton.icon(
-                  onPressed: superchargeActive ? null : _toggleSupercharge,
-                  icon: const Icon(Icons.flash_on),
-                  label: const Text('Activate (15s)'),
-                ),
-                const SizedBox(width: 12),
-                Text(
-                  superchargeActive
-                      ? 'ACTIVE: ${superchargeSecondsLeft}s left (Alliance Charge +1; Captured enabled)'
-                      : 'Inactive',
-                  style: TextStyle(
-                    color: superchargeActive ? Colors.green.shade700 : Colors.grey.shade700,
-                    fontWeight: FontWeight.w600,
+                const Text('Supercharge Mode', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                if (!compact)
+                  Row(
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: superchargeActive ? null : _toggleSupercharge,
+                        icon: const Icon(Icons.flash_on),
+                        label: const Text('Activate (15s)'),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          statusText,
+                          style: statusStyle,
+                          softWrap: true,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  )
+                else
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: superchargeActive ? null : _toggleSupercharge,
+                        icon: const Icon(Icons.flash_on),
+                        label: const Text('Activate (15s)'),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        statusText,
+                        style: statusStyle,
+                        softWrap: true,
+                        maxLines: 3,
+                      ),
+                    ],
                   ),
-                ),
+                const SizedBox(height: 8),
+                Text('Alliance Charge per press: ${_allianceChargePerPress()} pts'),
               ],
-            ),
-            const SizedBox(height: 8),
-            Text('Alliance Charge per press: ${_allianceChargePerPress()} pts'),
-          ],
+            );
+          },
         ),
       ),
     );
   }
-
-  void _goToSummary() {
-  Navigator.pushNamed(
-    context,
-    '/summary',
-    arguments: {
-      'matchId': widget.matchId,
-      'arena': null,                 // pass real arena if you have it
-      'alliance': widget.alliance,   // 'red' or 'blue' (optional context)
-    },
-  );
-}
-
 
   @override
   Widget build(BuildContext context) {
@@ -514,7 +510,7 @@ Future<void> _submitScore() async {
                           padding: const EdgeInsets.all(12),
                           child: Row(
                             children: [
-                              Text('Teams:', style: const TextStyle(fontWeight: FontWeight.bold)),
+                              const Text('Teams:', style: TextStyle(fontWeight: FontWeight.bold)),
                               const SizedBox(width: 8),
                               if (allianceTeams.isEmpty)
                                 const Text('—')
@@ -562,8 +558,7 @@ Future<void> _submitScore() async {
                               onDec: () => setState(() {
                                 if (allianceCharge > 0) allianceCharge--;
                               }),
-                              trailingText:
-                                  'per press: ${_allianceChargePerPress()} pts',
+                              trailingText: 'per press: ${_allianceChargePerPress()} pts',
                             ),
                             _countRow(
                               label: 'Minor Penalty',
@@ -632,10 +627,10 @@ Future<void> _submitScore() async {
                                         });
                                       },
                                       decEnabled: superchargeActive || matchEnded,
-                                      trailingText:
-                                          superchargeActive ? 'Enabled (+$kCapturedCharge each)' :
-                                          (matchEnded
-                                              ? 'Negative allowed (post‑match)'
+                                      trailingText: superchargeActive
+                                          ? 'Enabled (+$kCapturedCharge each)'
+                                          : (matchEnded
+                                              ? 'Negative allowed (post-match)'
                                               : 'Disabled until Supercharge or end'),
                                     ),
                                   ],

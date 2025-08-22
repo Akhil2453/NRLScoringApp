@@ -197,6 +197,49 @@ def get_matches():
     }), 200
 
 # -----------------------------
+# Golden points helpers
+# -----------------------------
+def golden_points_from_grid(grid):
+    """
+    grid: list[list[bool]] top->bottom (row 0 is top, last row is bottom)
+    Rule per column:
+      - You can only stack contiguously from the bottom.
+      - Points for height h in a column: sum_{k=0}^{h-1} (10 + 5*k)
+    """
+    if not isinstance(grid, list):
+        return 0
+
+    rows = len(grid)
+    cols = len(grid[0]) if rows else 0
+    total = 0
+
+    for c in range(cols):
+        # contiguous height from bottom
+        h = 0
+        for r in range(rows - 1, -1, -1):
+            try:
+                cell = bool(grid[r][c])
+            except Exception:
+                cell = False
+            if cell:
+                h += 1
+            else:
+                break
+        total += 10 * h + 5 * (h * (h - 1) // 2)
+
+    return total
+
+def golden_points_from_text(grid_text: str | None) -> int:
+    """Parse stored JSON text and compute golden points safely."""
+    if not grid_text:
+        return 0
+    try:
+        grid = json.loads(grid_text)
+        return golden_points_from_grid(grid)
+    except Exception:
+        return 0
+
+# -----------------------------
 # Match details
 # -----------------------------
 @app.route('/match/<int:match_id>/details', methods=['GET'])
@@ -215,6 +258,7 @@ def get_match_details(match_id):
             "alliance_charge": score.alliance_charge,
             "captured_charge": score.captured_charge,
             "golden_charge_stack": score.golden_charge_stack,
+            "golden_points": golden_points_from_text(score.golden_charge_stack),  # <-- NEW
             "minor_penalties": score.minor_penalties,
             "major_penalties": score.major_penalties,
             "full_parking": score.full_parking,
@@ -239,34 +283,6 @@ def get_match_details(match_id):
         "blue_score": serialize_score(blue_score)
     }), 200
 
-
-def golden_points_from_grid(grid):
-    """
-    grid: list[list[bool]] top->bottom (row 0 is top, last row is bottom)
-    Rule per column:
-      - You can only stack contiguously from the bottom.
-      - Points for height h in a column: sum_{k=0}^{h-1} (10 + 5*k)
-    """
-    if not isinstance(grid, list):
-        return 0
-
-    rows = len(grid)
-    cols = len(grid[0]) if rows else 0
-    total = 0
-
-    for c in range(cols):
-        # contiguous height from bottom
-        h = 0
-        for r in range(rows - 1, -1, -1):
-            cell = grid[r][c]
-            if cell:
-                h += 1
-            else:
-                break
-        total += 10 * h + 5 * (h * (h - 1) // 2)
-
-    return total
-
 # -----------------------------
 # Scoring logic
 # -----------------------------
@@ -281,23 +297,13 @@ def calculate_total_score(score):
     total += (score.partial_parking or 0) * 5
     total += (score.docked or 0) * 15
     total += (score.engaged or 0) * 10
+
+    # Golden stack points
+    total += golden_points_from_text(score.golden_charge_stack)
+
     total -= (score.minor_penalties or 0) * 5
     total -= (score.major_penalties or 0) * 15
-
-    # Golden stack points from JSON grid
-    golden_points = 0
-    try:
-        if score.golden_charge_stack:
-            grid = json.loads(score.golden_charge_stack)
-            golden_points = golden_points_from_grid(grid)
-    except Exception:
-        golden_points = 0
-
-    total += golden_points
     return total
-
-
-
 
 @app.route('/score/<int:match_id>/<alliance>', methods=['POST'])
 def submit_score(match_id, alliance):
@@ -315,25 +321,26 @@ def submit_score(match_id, alliance):
         score = ScoreEntry(match_id=match_id, alliance=alliance)
 
     # Assign with defaults
-    score.alliance_charge   = int(data.get('alliance_charge', score.alliance_charge or 0))
-    score.captured_charge   = int(data.get('captured_charge', score.captured_charge or 0))
-    score.golden_charge_stack = data.get('golden_charge_stack', score.golden_charge_stack or '')
-    score.minor_penalties   = int(data.get('minor_penalties', score.minor_penalties or 0))
-    score.major_penalties   = int(data.get('major_penalties', score.major_penalties or 0))
-    score.full_parking      = int(data.get('full_parking', score.full_parking or 0))
-    score.partial_parking   = int(data.get('partial_parking', score.partial_parking or 0))
-    score.docked            = int(data.get('docked', score.docked or 0))
-    score.engaged           = int(data.get('engaged', score.engaged or 0))
-    score.supercharge_mode  = bool(data.get('supercharge_mode', score.supercharge_mode or False))
+    score.alliance_charge      = int(data.get('alliance_charge', score.alliance_charge or 0))
+    score.captured_charge      = int(data.get('captured_charge', score.captured_charge or 0))
+    score.golden_charge_stack  = data.get('golden_charge_stack', score.golden_charge_stack or '')
+    score.minor_penalties      = int(data.get('minor_penalties', score.minor_penalties or 0))
+    score.major_penalties      = int(data.get('major_penalties', score.major_penalties or 0))
+    score.full_parking         = int(data.get('full_parking', score.full_parking or 0))
+    score.partial_parking      = int(data.get('partial_parking', score.partial_parking or 0))
+    score.docked               = int(data.get('docked', score.docked or 0))
+    score.engaged              = int(data.get('engaged', score.engaged or 0))
+    score.supercharge_mode     = bool(data.get('supercharge_mode', score.supercharge_mode or False))
     score.supercharge_end_time = data.get('supercharge_end_time', score.supercharge_end_time or '')
-    score.submitted_by      = data.get('submitted_by', score.submitted_by)
+    score.submitted_by         = data.get('submitted_by', score.submitted_by)
 
     db.session.add(score)
     db.session.commit()
 
     total_score = calculate_total_score(score)
+    golden_pts = golden_points_from_text(score.golden_charge_stack)  # <-- NEW
 
-    # Live emit
+    # Live emit (include golden_points)
     socketio.emit('score_update', {
         'match_id': match_id,
         'alliance': alliance,
@@ -341,6 +348,7 @@ def submit_score(match_id, alliance):
             'alliance_charge': score.alliance_charge,
             'captured_charge': score.captured_charge,
             'golden_charge_stack': score.golden_charge_stack,
+            'golden_points': golden_pts,  # <-- NEW
             'minor_penalties': score.minor_penalties,
             'major_penalties': score.major_penalties,
             'full_parking': score.full_parking,
@@ -413,11 +421,13 @@ def match_summary(match_id):
                 "total_score": 0,
                 "finalised": False
             }
+        golden_pts = golden_points_from_text(score.golden_charge_stack)  # <-- NEW
         return {
             "score_breakdown": {
                 "alliance_charge": score.alliance_charge,
                 "captured_charge": score.captured_charge,
                 "golden_charge_stack": score.golden_charge_stack,
+                "golden_points": golden_pts,  # <-- NEW
                 "minor_penalties": score.minor_penalties,
                 "major_penalties": score.major_penalties,
                 "full_parking": score.full_parking,
