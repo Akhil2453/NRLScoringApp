@@ -6,6 +6,8 @@ import hashlib
 import csv
 from io import StringIO
 import json
+from flask_socketio import SocketIO, join_room, leave_room, emit
+
 
 # -----------------------------
 # Flask & extensions
@@ -238,6 +240,44 @@ def golden_points_from_text(grid_text: str | None) -> int:
         return golden_points_from_grid(grid)
     except Exception:
         return 0
+
+
+def calculate_total_from_payload(d: dict) -> int:
+    """Same scoring as calculate_total_score(), but from a plain dict (live/draft)."""
+    base_points = 5
+    supercharge_bonus = 1 if d.get('supercharge_mode') else 0
+
+    alliance_charge = int(d.get('alliance_charge', 0) or 0)
+    captured_charge = int(d.get('captured_charge', 0) or 0)
+    full_parking    = int(d.get('full_parking', 0) or 0)
+    partial_parking = int(d.get('partial_parking', 0) or 0)
+    docked          = int(d.get('docked', 0) or 0)
+    engaged         = int(d.get('engaged', 0) or 0)
+    minor_pen       = int(d.get('minor_penalties', 0) or 0)
+    major_pen       = int(d.get('major_penalties', 0) or 0)
+
+    # golden: accept list (grid) or JSON string
+    golden_raw = d.get('golden_charge_stack')
+    if isinstance(golden_raw, str):
+        golden_pts = golden_points_from_text(golden_raw)
+    else:
+        try:
+            golden_pts = golden_points_from_grid(golden_raw or [])
+        except Exception:
+            golden_pts = 0
+
+    total = 0
+    total += alliance_charge * (base_points + supercharge_bonus)
+    total += captured_charge * 10
+    total += full_parking * 10
+    total += partial_parking * 5
+    total += docked * 15
+    total += engaged * 10
+    total += golden_pts
+    total -= minor_pen * 5
+    total -= major_pen * 15
+    return total
+
 
 # -----------------------------
 # Match details
@@ -505,6 +545,58 @@ def view_team_profile_by_number(team_number):
         'red_cards': team.red_cards,
         'yellow_cards': team.yellow_cards
     }), 200
+
+# -----------------------------
+# Live scoring sockets (draft)
+# -----------------------------
+@socketio.on('join_match')
+def on_join_match(data):
+    match_id = data.get('match_id')
+    if not match_id:
+        return
+    room = f'match_{match_id}'
+    join_room(room)
+    emit('joined', {'room': room})
+
+@socketio.on('leave_match')
+def on_leave_match(data):
+    match_id = data.get('match_id')
+    if not match_id:
+        return
+    room = f'match_{match_id}'
+    leave_room(room)
+
+@socketio.on('live_score_update')
+def on_live_score_update(data):
+    """
+    Expect:
+    {
+      'match_id': <int>,
+      'alliance': 'red'|'blue',
+      'score_breakdown': {... same keys as /score ... }
+    }
+    """
+    match_id = data.get('match_id')
+    alliance = data.get('alliance')
+    breakdown = data.get('score_breakdown') or {}
+
+    if not match_id or alliance not in ['red', 'blue']:
+        return
+
+    total = calculate_total_from_payload(breakdown)
+
+    payload = {
+        'match_id': match_id,
+        'alliance': alliance,
+        'score_breakdown': breakdown,
+        'total_score': total,
+        'finalised': False,
+        'live': True
+    }
+    # Broadcast to everyone viewing this match (including sender)
+    emit('score_update', payload, to=f'match_{match_id}', include_self=True)
+
+
 
 # -----------------------------
 # Bootstrap & run

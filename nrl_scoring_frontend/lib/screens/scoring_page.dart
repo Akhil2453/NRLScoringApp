@@ -2,11 +2,14 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'dart:io' show Platform;
+import 'package:socket_io_client/socket_io_client.dart' as IO;
 
 /// ScoringPage
 /// Navigator.pushNamed(context, '/score', arguments: {
 ///   'matchId': <int>,
-///   'alliance': 'red' | 'blue',
+///   'alliance': 'red'|'blue',
 /// });
 class ScoringPage extends StatefulWidget {
   final int matchId;
@@ -23,15 +26,38 @@ class ScoringPage extends StatefulWidget {
 }
 
 class _ScoringPageState extends State<ScoringPage> {
-  // --- API base ---
-  final String baseUrl = 'http://localhost:5000';
+  // ===== Base URL helpers (works for Web, Desktop, Emulators) =====
+  String getBaseUrl() {
+    if (kIsWeb) return 'http://localhost:5000';
+    try {
+      if (Platform.isAndroid) return 'http://10.0.2.2:5000'; // Android emulator loopback
+      return 'http://localhost:5000';
+    } catch (_) {
+      return 'http://localhost:5000';
+    }
+  }
 
-  // --- Match/Alliance info pulled from backend ---
+  late final String baseUrl = getBaseUrl();
+
+  // ===== Socket.IO =====
+  IO.Socket? _socket;
+  bool _finalised = false;
+
+  // Live mirrors of BOTH alliances (don’t overwrite your input fields)
+  Map<String, dynamic>? liveRed;   // last score_update payload for red
+  Map<String, dynamic>? liveBlue;  // last score_update payload for blue
+  int? liveRedTotal;
+  int? liveBlueTotal;
+
+  // NEW: debounce to limit live emits
+  Timer? _liveDebounce; // NEW
+
+  // ===== Match/Alliance info from backend =====
   int? matchNumber;
   List<String> redTeams = [];
   List<String> blueTeams = [];
 
-  // --- Scoring state ---
+  // ===== Scoring state (your alliance’s inputs) =====
   int allianceCharge = 0;
   int capturedCharge = 0;
   int minorPenalties = 0;
@@ -41,28 +67,27 @@ class _ScoringPageState extends State<ScoringPage> {
   bool fullParking = false;
   bool partialParking = false;
 
-  // Golden charge 4x4 grid (false = empty, true = placed)
+  // Golden charge 4x4
   final int goldRows = 4;
   final int goldCols = 4;
   late List<List<bool>> goldenGrid;
 
-  // --- Supercharge (15 seconds) ---
+  // Supercharge (15s)
   bool superchargeActive = false;
   int superchargeSecondsLeft = 0;
   Timer? superchargeTimer;
 
-  // --- End-of-match captured negative adjustments allowed ---
+  // End-of-match
   bool matchEnded = false;
 
-  // --- UI helpers ---
+  // UI helpers
   bool _loadingDetails = true;
   bool _submitting = false;
 
-  // --- Golden constants ---
-  static const int kGoldenBase = 10;        // 10 per block
-  static const int kGoldenStackBonus = 5;   // +5 per level above bottom
+  // ===== Golden constants & helpers =====
+  static const int kGoldenBase = 10;      // 10 per block
+  static const int kGoldenStackBonus = 5; // +5 per level above bottom
 
-  /// Returns contiguous height from the bottom for a column c.
   int _columnHeight(int c) {
     int h = 0;
     for (int r = goldRows - 1; r >= 0; r--) {
@@ -75,20 +100,18 @@ class _ScoringPageState extends State<ScoringPage> {
     return h;
   }
 
-  /// The next placeable row index in column c (the lowest empty).
   int _nextPlaceableRow(int c) {
     int h = _columnHeight(c);
     return (goldRows - 1) - h;
   }
 
-  /// Place only the next placeable; remove only the topmost filled.
   bool _canPlaceAt(int r, int c) => !goldenGrid[r][c] && r == _nextPlaceableRow(c);
+
   bool _canRemoveAt(int r, int c) {
     final h = _columnHeight(c);
     return goldenGrid[r][c] && r == (goldRows - h);
   }
 
-  /// Total golden points using stacking rule
   int _goldenPoints() {
     int pts = 0;
     for (int c = 0; c < goldCols; c++) {
@@ -98,19 +121,116 @@ class _ScoringPageState extends State<ScoringPage> {
     return pts;
   }
 
+  // ===== Lifecycle =====
   @override
   void initState() {
     super.initState();
     goldenGrid = List.generate(goldRows, (_) => List.generate(goldCols, (_) => false));
     _loadMatchDetails();
+    _connectSocket(); // <--- live sync
   }
 
   @override
   void dispose() {
     superchargeTimer?.cancel();
+    // NEW: leave match room and cleanup debounce
+    try {
+      _socket?.emit('leave_match', {'match_id': widget.matchId}); // NEW
+    } catch (_) {}
+    _liveDebounce?.cancel(); // NEW
+    _socket?.dispose();
     super.dispose();
   }
 
+  // ===== Socket.IO connection =====
+  void _connectSocket() {
+    _socket = IO.io(
+      baseUrl,
+      IO.OptionBuilder()
+        .setTransports(['websocket'])
+        .disableAutoConnect()
+        .build(),
+    );
+
+    _socket!.onConnect((_) {
+      debugPrint('Socket connected');
+      // NEW: Join this match room so we only receive events for the same match
+      _socket!.emit('join_match', {'match_id': widget.matchId}); // NEW
+    });
+
+    _socket!.onDisconnect((_) => debugPrint('Socket disconnected'));
+
+    // Someone submitted or updated a score
+    _socket!.on('score_update', (data) {
+      try {
+        if (data == null) return;
+        if (data['match_id'] != widget.matchId) return; // ignore other matches
+
+        final alliance = (data['alliance'] ?? '').toString();
+        final total = data['total_score'] as int?;
+        // final sb = data['score_breakdown'] as Map?; // not used here, but available
+
+        setState(() {
+          if (alliance == 'red') {
+            liveRed = data;
+            liveRedTotal = total;
+          } else if (alliance == 'blue') {
+            liveBlue = data;
+            liveBlueTotal = total;
+          }
+          if (data['finalised'] == true) _finalised = true;
+        });
+      } catch (_) {}
+    });
+
+    // Head Referee finalised the match
+    _socket!.on('match_finalised', (data) {
+      try {
+        if (data == null) return;
+        if (data['match_id'] != widget.matchId) return;
+        setState(() {
+          _finalised = true;
+        });
+        _showSnack('Match finalised by Head Referee');
+      } catch (_) {}
+    });
+
+    _socket!.connect();
+  }
+
+  // NEW: Build live payload for socket emit
+  Map<String, dynamic> _buildLivePayload() { // NEW
+    return {
+      'alliance_charge': allianceCharge,
+      'captured_charge': capturedCharge,
+      'golden_charge_stack': goldenGrid,
+      'minor_penalties': minorPenalties,
+      'major_penalties': majorPenalties,
+      'full_parking': fullParking ? 1 : 0,
+      'partial_parking': partialParking ? 1 : 0,
+      'docked': docked,
+      'engaged': engaged,
+      'supercharge_mode': superchargeActive,
+    };
+  }
+
+  // NEW: Emit live update immediately
+  void _broadcastLive() { // NEW
+    if (_socket?.connected != true) return;
+    _socket!.emit('live_score_update', {
+      'match_id': widget.matchId,
+      'alliance': widget.alliance.toLowerCase(),
+      'score_breakdown': _buildLivePayload(),
+    });
+  }
+
+  // NEW: Debounce broadcasts to avoid spamming while tapping fast
+  void _scheduleLiveBroadcast() { // NEW
+    _liveDebounce?.cancel();
+    _liveDebounce = Timer(const Duration(milliseconds: 200), _broadcastLive);
+  }
+
+  // ===== REST: load match details =====
   Future<void> _loadMatchDetails() async {
     setState(() => _loadingDetails = true);
     try {
@@ -121,6 +241,16 @@ class _ScoringPageState extends State<ScoringPage> {
           matchNumber = data['match_number'];
           redTeams = (data['red_teams'] as List<dynamic>).cast<String>();
           blueTeams = (data['blue_teams'] as List<dynamic>).cast<String>();
+
+          final red = data['red_score'] as Map?;
+          final blue = data['blue_score'] as Map?;
+          if (red != null) {
+            liveRedTotal = _safeTotalFromDetails(red);
+          }
+          if (blue != null) {
+            liveBlueTotal = _safeTotalFromDetails(blue);
+          }
+
           _loadingDetails = false;
         });
       } else {
@@ -133,7 +263,16 @@ class _ScoringPageState extends State<ScoringPage> {
     }
   }
 
-  // --- Points model (keep in sync with backend) ---
+  int? _safeTotalFromDetails(Map details) {
+    try {
+      // Keep null to avoid double-compute; live totals will arrive from socket when someone edits
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ===== Points model (keep in sync with backend) =====
   static const int kAllianceChargeBase = 5;
   static const int kCapturedCharge = 10;
   static const int kDock = 15;
@@ -153,12 +292,10 @@ class _ScoringPageState extends State<ScoringPage> {
     return c;
   }
 
-  int _allianceChargePerPress() =>
-      superchargeActive ? (kAllianceChargeBase + 1) : kAllianceChargeBase;
+  int _allianceChargePerPress() => superchargeActive ? (kAllianceChargeBase + 1) : kAllianceChargeBase;
 
   int _previewTotal() {
-    final parkingPoints =
-        (fullParking ? kFullParking : 0) + (partialParking ? kPartialParking : 0);
+    final parkingPoints = (fullParking ? kFullParking : 0) + (partialParking ? kPartialParking : 0);
     final goldenPoints = _goldenPoints();
     final total = (allianceCharge * _allianceChargePerPress()) +
         (capturedCharge * kCapturedCharge) +
@@ -171,30 +308,34 @@ class _ScoringPageState extends State<ScoringPage> {
     return total;
   }
 
-  // --- Supercharge behaviour ---
+  // ===== Supercharge =====
   void _toggleSupercharge() {
-    if (superchargeActive) return; // ignore if already active
+    if (superchargeActive || _finalised) return;
     setState(() {
       superchargeActive = true;
       superchargeSecondsLeft = 15;
     });
+    _scheduleLiveBroadcast(); // NEW
 
     superchargeTimer?.cancel();
     superchargeTimer = Timer.periodic(const Duration(seconds: 1), (t) {
       if (superchargeSecondsLeft <= 1) {
         t.cancel();
         setState(() {
-          superchargeActive = false; // disable bonus + captured inputs
+          superchargeActive = false;
           superchargeSecondsLeft = 0;
         });
+        _scheduleLiveBroadcast(); // NEW
       } else {
         setState(() => superchargeSecondsLeft--);
+        _scheduleLiveBroadcast(); // NEW
       }
     });
   }
 
-  // --- Reset with confirmation ---
+  // ===== Reset =====
   Future<void> _confirmReset() async {
+    if (_finalised) return;
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -223,18 +364,13 @@ class _ScoringPageState extends State<ScoringPage> {
         matchEnded = false;
         goldenGrid = List.generate(goldRows, (_) => List.generate(goldCols, (_) => false));
       });
+      _scheduleLiveBroadcast(); // NEW
     }
   }
 
-  // --- NAV: go to summary ---
-  void _goToSummary() {
-    Navigator.pushReplacementNamed(context, '/summary', arguments: {
-      'matchId': widget.matchId,
-    });
-  }
-
-  // --- Submit score to backend ---
+  // ===== Submit to backend =====
   Future<void> _submitScore() async {
+    if (_finalised) return;
     setState(() => _submitting = true);
     try {
       final body = {
@@ -250,7 +386,7 @@ class _ScoringPageState extends State<ScoringPage> {
         'supercharge_mode': superchargeActive,
         'supercharge_end_time':
             superchargeActive ? DateTime.now().toIso8601String() : '',
-        'submitted_by': null, // wire real user id if available
+        'submitted_by': null,
       };
 
       final url = Uri.parse('$baseUrl/score/${widget.matchId}/${widget.alliance}');
@@ -262,7 +398,7 @@ class _ScoringPageState extends State<ScoringPage> {
 
       if (res.statusCode == 200) {
         setState(() => matchEnded = true);
-        _goToSummary(); // navigate after submit
+        _goToSummary();
       } else {
         _showSnack('Submit failed (${res.statusCode}).');
       }
@@ -273,11 +409,65 @@ class _ScoringPageState extends State<ScoringPage> {
     }
   }
 
+  void _goToSummary() {
+    Navigator.pushNamed(context, '/summary', arguments: {
+      'matchId': widget.matchId,
+    });
+  }
+
   void _showSnack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
-  // --- Small builders ---
+  // ===== Small builders =====
+  Widget _liveScoreBar() {
+    final redTotal = liveRedTotal?.toString() ?? '—';
+    final blueTotal = liveBlueTotal?.toString() ?? '—';
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            Expanded(
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  children: [
+                    Text('RED', style: TextStyle(color: Colors.red.shade700, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    Text(redTotal, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800)),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  children: [
+                    Text('BLUE', style: TextStyle(color: Colors.blue.shade700, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    Text(blueTotal, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800)),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _countRow({
     required String label,
     required int value,
@@ -291,9 +481,9 @@ class _ScoringPageState extends State<ScoringPage> {
       child: Row(
         children: [
           Expanded(flex: 2, child: Text(label, style: const TextStyle(fontWeight: FontWeight.w600))),
-          IconButton(onPressed: onInc, icon: const Icon(Icons.add_circle)),
+          IconButton(onPressed: _finalised ? null : onInc, icon: const Icon(Icons.add_circle)),
           IconButton(
-            onPressed: decEnabled ? onDec : null,
+            onPressed: _finalised ? null : (decEnabled ? onDec : null),
             icon: const Icon(Icons.remove_circle),
           ),
           const SizedBox(width: 12),
@@ -329,24 +519,26 @@ class _ScoringPageState extends State<ScoringPage> {
               children: [
                 FilterChip(
                   selected: fullParking,
-                  label: const Text('Full'),
-                  onSelected: (v) => setState(() {
+                  onSelected: _finalised ? null : (v) => setState(() {
                     fullParking = v;
                     if (v) partialParking = false;
+                    _scheduleLiveBroadcast(); // NEW
                   }),
+                  label: const Text('Full'),
                 ),
                 FilterChip(
                   selected: partialParking,
-                  label: const Text('Partial'),
-                  onSelected: (v) => setState(() {
+                  onSelected: _finalised ? null : (v) => setState(() {
                     partialParking = v;
                     if (v) fullParking = false;
+                    _scheduleLiveBroadcast(); // NEW
                   }),
+                  label: const Text('Partial'),
                 ),
               ],
             ),
             const SizedBox(height: 8),
-            Text('Points: ${(fullParking ? kFullParking : 0) + (partialParking ? kPartialParking : 0)}'),
+            Text('Points: ${(fullParking ? 10 : 0) + (partialParking ? 5 : 0)}'),
           ],
         ),
       ),
@@ -367,15 +559,18 @@ class _ScoringPageState extends State<ScoringPage> {
                 return Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: List.generate(goldCols, (c) {
+                    final selected = goldenGrid[r][c];
                     return Padding(
                       padding: const EdgeInsets.all(6.0),
                       child: InkWell(
-                        onTap: () {
+                        onTap: _finalised ? null : () {
                           setState(() {
                             if (_canPlaceAt(r, c)) {
                               goldenGrid[r][c] = true;
+                              _scheduleLiveBroadcast(); // NEW
                             } else if (_canRemoveAt(r, c)) {
                               goldenGrid[r][c] = false;
+                              _scheduleLiveBroadcast(); // NEW
                             } else {
                               _showSnack('Place from bottom up • Remove from top down in each column.');
                             }
@@ -385,7 +580,7 @@ class _ScoringPageState extends State<ScoringPage> {
                           width: 28,
                           height: 28,
                           decoration: BoxDecoration(
-                            color: goldenGrid[r][c]
+                            color: selected
                                 ? Colors.amber
                                 : (_canPlaceAt(r, c) ? Colors.amber.shade100 : Colors.grey.shade300),
                             borderRadius: BorderRadius.circular(4),
@@ -430,19 +625,13 @@ class _ScoringPageState extends State<ScoringPage> {
                   Row(
                     children: [
                       ElevatedButton.icon(
-                        onPressed: superchargeActive ? null : _toggleSupercharge,
+                        onPressed: superchargeActive || _finalised ? null : () { _toggleSupercharge(); _scheduleLiveBroadcast(); }, // NEW
                         icon: const Icon(Icons.flash_on),
                         label: const Text('Activate (15s)'),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
-                        child: Text(
-                          statusText,
-                          style: statusStyle,
-                          softWrap: true,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                        child: Text(statusText, style: statusStyle, softWrap: true, maxLines: 2, overflow: TextOverflow.ellipsis),
                       ),
                     ],
                   )
@@ -451,17 +640,12 @@ class _ScoringPageState extends State<ScoringPage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       ElevatedButton.icon(
-                        onPressed: superchargeActive ? null : _toggleSupercharge,
+                        onPressed: superchargeActive || _finalised ? null : () { _toggleSupercharge(); _scheduleLiveBroadcast(); }, // NEW
                         icon: const Icon(Icons.flash_on),
                         label: const Text('Activate (15s)'),
                       ),
                       const SizedBox(height: 8),
-                      Text(
-                        statusText,
-                        style: statusStyle,
-                        softWrap: true,
-                        maxLines: 3,
-                      ),
+                      Text(statusText, style: statusStyle, softWrap: true, maxLines: 3),
                     ],
                   ),
                 const SizedBox(height: 8),
@@ -488,9 +672,14 @@ class _ScoringPageState extends State<ScoringPage> {
         ),
         actions: [
           IconButton(
-            onPressed: _confirmReset,
+            onPressed: _finalised ? null : _confirmReset,
             tooltip: 'Reset',
             icon: const Icon(Icons.restart_alt),
+          ),
+          IconButton(
+            onPressed: _goToSummary,
+            tooltip: 'Summary',
+            icon: const Icon(Icons.summarize),
           ),
         ],
       ),
@@ -504,6 +693,9 @@ class _ScoringPageState extends State<ScoringPage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      // ===== Live score bar (both alliances) =====
+                      _liveScoreBar(),
+
                       // Teams bar
                       Card(
                         child: Padding(
@@ -519,8 +711,7 @@ class _ScoringPageState extends State<ScoringPage> {
                                   spacing: 8,
                                   children: allianceTeams
                                       .map((t) => Chip(
-                                            backgroundColor:
-                                                isRed ? Colors.red.shade100 : Colors.blue.shade100,
+                                            backgroundColor: isRed ? Colors.red.shade100 : Colors.blue.shade100,
                                             label: Text(t),
                                           ))
                                       .toList(),
@@ -546,35 +737,40 @@ class _ScoringPageState extends State<ScoringPage> {
                       ),
 
                       const SizedBox(height: 10),
-                      // Left & right columns
+
+                      // Two columns
                       LayoutBuilder(builder: (context, c) {
                         final twoCols = c.maxWidth >= 760;
+
                         final left = Column(
                           children: [
                             _countRow(
                               label: 'Alliance Charge',
                               value: allianceCharge,
-                              onInc: () => setState(() => allianceCharge++),
+                              onInc: () => setState(() { allianceCharge++; _scheduleLiveBroadcast(); }), // NEW
                               onDec: () => setState(() {
                                 if (allianceCharge > 0) allianceCharge--;
+                                _scheduleLiveBroadcast(); // NEW
                               }),
                               trailingText: 'per press: ${_allianceChargePerPress()} pts',
                             ),
                             _countRow(
                               label: 'Minor Penalty',
                               value: minorPenalties,
-                              onInc: () => setState(() => minorPenalties++),
+                              onInc: () => setState(() { minorPenalties++; _scheduleLiveBroadcast(); }), // NEW
                               onDec: () => setState(() {
                                 if (minorPenalties > 0) minorPenalties--;
+                                _scheduleLiveBroadcast(); // NEW
                               }),
                               trailingText: '$kMinorPenalty each',
                             ),
                             _countRow(
                               label: 'Major Penalty',
                               value: majorPenalties,
-                              onInc: () => setState(() => majorPenalties++),
+                              onInc: () => setState(() { majorPenalties++; _scheduleLiveBroadcast(); }), // NEW
                               onDec: () => setState(() {
                                 if (majorPenalties > 0) majorPenalties--;
+                                _scheduleLiveBroadcast(); // NEW
                               }),
                               trailingText: '$kMajorPenalty each',
                             ),
@@ -588,50 +784,52 @@ class _ScoringPageState extends State<ScoringPage> {
                             _countRow(
                               label: 'Dock on Charge Station',
                               value: docked,
-                              onInc: () => setState(() => docked++),
+                              onInc: () => setState(() { docked++; _scheduleLiveBroadcast(); }), // NEW
                               onDec: () => setState(() {
                                 if (docked > 0) docked--;
+                                _scheduleLiveBroadcast(); // NEW
                               }),
                               trailingText: '$kDock each',
                             ),
                             _countRow(
                               label: 'Engage with Station',
                               value: engaged,
-                              onInc: () => setState(() => engaged++),
+                              onInc: () => setState(() { engaged++; _scheduleLiveBroadcast(); }), // NEW
                               onDec: () => setState(() {
                                 if (engaged > 0) engaged--;
+                                _scheduleLiveBroadcast(); // NEW
                               }),
                               trailingText: '$kEngage each',
                             ),
                             _superchargeCard(),
-                            // Captured Charge section
+                            // Captured Charge
                             Card(
                               child: Padding(
                                 padding: const EdgeInsets.all(12),
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    const Text('Captured Charge',
-                                        style: TextStyle(fontWeight: FontWeight.bold)),
+                                    const Text('Captured Charge', style: TextStyle(fontWeight: FontWeight.bold)),
                                     const SizedBox(height: 8),
                                     _countRow(
                                       label: 'Count',
                                       value: capturedCharge,
-                                      onInc: superchargeActive
-                                          ? () => setState(() => capturedCharge++)
+                                      onInc: superchargeActive && !_finalised
+                                          ? () => setState(() { capturedCharge++; _scheduleLiveBroadcast(); }) // NEW
                                           : () {},
                                       onDec: () {
+                                        if (_finalised) return;
                                         if (!matchEnded && !superchargeActive) return;
                                         setState(() {
                                           if (capturedCharge > 0) capturedCharge--;
+                                          _scheduleLiveBroadcast(); // NEW
                                         });
                                       },
-                                      decEnabled: superchargeActive || matchEnded,
+                                      decEnabled: (superchargeActive || matchEnded) && !_finalised,
                                       trailingText: superchargeActive
                                           ? 'Enabled (+$kCapturedCharge each)'
-                                          : (matchEnded
-                                              ? 'Negative allowed (post-match)'
-                                              : 'Disabled until Supercharge or end'),
+                                          : (matchEnded ? 'Negative allowed (post-match)'
+                                                        : 'Disabled until Supercharge or end'),
                                     ),
                                   ],
                                 ),
@@ -667,21 +865,14 @@ class _ScoringPageState extends State<ScoringPage> {
                           child: Row(
                             children: [
                               Text(
-                                'Preview Total: ${_previewTotal()}',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 18,
-                                ),
+                                'Preview Total (your side): ${_previewTotal()}',
+                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
                               ),
                               const Spacer(),
                               FilledButton(
-                                onPressed: _submitting ? null : _submitScore,
+                                onPressed: (_submitting || _finalised) ? null : _submitScore,
                                 child: _submitting
-                                    ? const SizedBox(
-                                        width: 18,
-                                        height: 18,
-                                        child: CircularProgressIndicator(strokeWidth: 2),
-                                      )
+                                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
                                     : const Text('Submit Score'),
                               ),
                             ],
