@@ -2,6 +2,11 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
+// NEW: add socket client + platform helpers for robust local dev
+import 'package:socket_io_client/socket_io_client.dart' as IO; // NEW
+import 'package:flutter/foundation.dart' show kIsWeb;           // NEW
+import 'dart:io' show Platform;                                 // NEW
+
 class MatchSummaryPage extends StatefulWidget {
   final int matchId;
   const MatchSummaryPage({Key? key, required this.matchId}) : super(key: key);
@@ -11,14 +16,100 @@ class MatchSummaryPage extends StatefulWidget {
 }
 
 class _MatchSummaryPageState extends State<MatchSummaryPage> {
+  // Keep your existing HTTP base for REST:
   final String baseUrl = 'http://localhost:5000';
+
+  // NEW: compute a socket URL that works on Android emulator too
+  String getSocketUrl() { // NEW
+    if (kIsWeb) return 'http://localhost:5000';
+    try {
+      if (Platform.isAndroid) return 'http://10.0.2.2:5000';
+      return 'http://localhost:5000';
+    } catch (_) {
+      return 'http://localhost:5000';
+    }
+  }
+
   bool _loading = true;
   Map<String, dynamic>? summary; // whole JSON
+
+  // NEW: socket + live overlays
+  IO.Socket? _socket;                        // NEW
+  Map<String, dynamic>? _liveRedBD;          // NEW live red breakdown
+  Map<String, dynamic>? _liveBlueBD;         // NEW live blue breakdown
+  int? _liveRedTotal;                        // NEW live red total
+  int? _liveBlueTotal;                       // NEW live blue total
+  bool _finalised = false;                   // NEW final flag
 
   @override
   void initState() {
     super.initState();
+    _connectSocket();  // NEW
     _load();
+  }
+
+  @override
+  void dispose() {
+    // NEW: leave match room and cleanup
+    try {
+      _socket?.emit('leave_match', {'match_id': widget.matchId});
+    } catch (_) {}
+    _socket?.dispose();
+    super.dispose();
+  }
+
+  // NEW: Socket.IO connection & listeners
+  void _connectSocket() { // NEW
+    _socket = IO.io(
+      getSocketUrl(),
+      IO.OptionBuilder()
+        .setTransports(['websocket'])
+        .disableAutoConnect()
+        .build(),
+    );
+
+    _socket!.onConnect((_) {
+      // Join this match room so we only receive relevant events
+      _socket!.emit('join_match', {'match_id': widget.matchId});
+    });
+
+    // Live score updates from either referee
+    _socket!.on('score_update', (data) {
+      try {
+        if (data == null) return;
+        if (data['match_id'] != widget.matchId) return;
+
+        final alliance = (data['alliance'] ?? '').toString();
+        final total = data['total_score'] as int?;
+        final bd = (data['score_breakdown'] ?? {}) as Map;
+
+        setState(() {
+          if (alliance == 'red') {
+            _liveRedBD = Map<String, dynamic>.from(bd);
+            _liveRedTotal = total;
+          } else if (alliance == 'blue') {
+            _liveBlueBD = Map<String, dynamic>.from(bd);
+            _liveBlueTotal = total;
+          }
+          if (data['finalised'] == true) _finalised = true;
+        });
+      } catch (_) {}
+    });
+
+    // Finalisation broadcast
+    _socket!.on('match_finalised', (data) {
+      try {
+        if (data == null) return;
+        if (data['match_id'] != widget.matchId) return;
+        setState(() {
+          _finalised = true;
+        });
+        // Optionally refresh once, to pull any last computed fields
+        _load();
+      } catch (_) {}
+    });
+
+    _socket!.connect();
   }
 
   Future<void> _load() async {
@@ -79,13 +170,22 @@ class _MatchSummaryPageState extends State<MatchSummaryPage> {
   }
 
   // ---- Helpers to get breakdown & points per category ----
+  // NEW: Prefer live breakdown if available
   Map<String, dynamic> _bd(String side) {
+    // Live overlays
+    if (side == 'red' && _liveRedBD != null) return _liveRedBD!;
+    if (side == 'blue' && _liveBlueBD != null) return _liveBlueBD!;
+
+    // Fallback to summary JSON
     final s = summary;
     if (s == null) return {};
     return ((s['score']?[side] ?? {})['score_breakdown'] ?? {}) as Map<String, dynamic>;
   }
 
+  // NEW: Prefer live totals if available
   int _total(String side) {
+    if (side == 'red' && _liveRedTotal != null) return _liveRedTotal!;
+    if (side == 'blue' && _liveBlueTotal != null) return _liveBlueTotal!;
     final s = summary;
     if (s == null) return 0;
     return (s['score']?[side]?['total_score'] ?? 0) as int;
@@ -98,7 +198,11 @@ class _MatchSummaryPageState extends State<MatchSummaryPage> {
   }
 
   int _capturePoints(String side) => ((_bd(side)['captured_charge'] ?? 0) as int) * 10;
-  int _chargePoints(String side) => ((_bd(side)['alliance_charge'] ?? 0) as int) * 5; // base-only preview
+
+  // Note: For display we keep base-only preview for Alliance Charge (5 per press),
+  // while the true total from backend already includes supercharge.
+  int _chargePoints(String side) => ((_bd(side)['alliance_charge'] ?? 0) as int) * 5;
+
   int _chargeStationPoints(String side) {
     final bd = _bd(side);
     final dock = (bd['docked'] ?? 0) as int;
@@ -116,16 +220,12 @@ class _MatchSummaryPageState extends State<MatchSummaryPage> {
   }
 
   // ---- Quick Ranking Points (RP) rules — tweak as needed ----
-  // WIN RP: winner 2, loser 0, tie 1 each
-  // SC RP: +1 if captured_charge >= 3
-  // ChSt RP: +1 if docked + engaged >= 2
   Map<String, int> _rp(String side) {
     final redTotal = _total('red');
     final blueTotal = _total('blue');
     final bd = _bd(side);
-    final other = side == 'red' ? 'blue' : 'red';
-    final myTotal = side == 'red' ? redTotal : blueTotal;
-    final othTotal = side == 'red' ? blueTotal : redTotal;
+    final myTotal = (side == 'red') ? redTotal : blueTotal;
+    final othTotal = (side == 'red') ? blueTotal : redTotal;
 
     int winRP = 0;
     if (myTotal > othTotal) winRP = 2;
@@ -135,8 +235,8 @@ class _MatchSummaryPageState extends State<MatchSummaryPage> {
     final docked = (bd['docked'] ?? 0) as int;
     final engaged = (bd['engaged'] ?? 0) as int;
 
-    final scRP = captured >= 3 ? 1 : 0;                 // threshold tweakable
-    final chstRP = (docked + engaged) >= 2 ? 1 : 0;     // threshold tweakable
+    final scRP = captured >= 3 ? 1 : 0;
+    final chstRP = (docked + engaged) >= 2 ? 1 : 0;
     return {'win': winRP, 'sc': scRP, 'chst': chstRP};
   }
 
@@ -177,7 +277,7 @@ class _MatchSummaryPageState extends State<MatchSummaryPage> {
       );
       if (res.statusCode == 200) {
         _snack('Scores finalised.');
-        _load(); // refresh to show finalised flag if needed
+        _load();
       } else {
         _snack('Finalise failed (${res.statusCode})');
       }
@@ -189,7 +289,6 @@ class _MatchSummaryPageState extends State<MatchSummaryPage> {
   // ---- End match: return to home (adjust to your nav flow) ----
   void _endMatch() {
     Navigator.popUntil(context, (route) => route.isFirst);
-    // Or: Navigator.pushReplacementNamed(context, '/home', arguments: {...});
   }
 
   // ---- UI building blocks ----
@@ -309,7 +408,6 @@ class _MatchSummaryPageState extends State<MatchSummaryPage> {
   }
 
   Widget _centerBreakdown() {
-    // Build five rows: CAPTURE, CHARGE, GOLDEN CHARGE, CHARGE STATION, PENALTIES
     Widget row(String title, int redVal, int blueVal) {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 8),
@@ -339,7 +437,7 @@ class _MatchSummaryPageState extends State<MatchSummaryPage> {
 
     final captureR = _capturePoints('red');
     final captureB = _capturePoints('blue');
-    final chargeR = _chargePoints('red');
+    final chargeR = _chargePoints('red'); // base preview only
     final chargeB = _chargePoints('blue');
     final goldenR = _goldenPoints('red');
     final goldenB = _goldenPoints('blue');
@@ -356,11 +454,11 @@ class _MatchSummaryPageState extends State<MatchSummaryPage> {
       ),
       child: Column(
         children: [
-          row('CAPTURE', captureR, captureB),
-          row('CHARGE', chargeR, chargeB),
-          row('GOLDEN CHARGE', goldenR, goldenB),
+          row('CAPTURE',        captureR, captureB),
+          row('CHARGE',         chargeR,  chargeB),
+          row('GOLDEN CHARGE',  goldenR,  goldenB),
           row('CHARGE STATION', stationR, stationB),
-          row('PENALTIES', penaltyR, penaltyB),
+          row('PENALTIES',      penaltyR, penaltyB),
         ],
       ),
     );
@@ -402,7 +500,7 @@ class _MatchSummaryPageState extends State<MatchSummaryPage> {
                           ),
                           const SizedBox(height: 8),
 
-                          // Top big RED | BLUE score bars
+                          // Top big RED | BLUE score bars (LIVE preferred)
                           LayoutBuilder(
                             builder: (context, c) {
                               return Row(
@@ -410,7 +508,7 @@ class _MatchSummaryPageState extends State<MatchSummaryPage> {
                                   Expanded(
                                     child: _scorePillar(
                                       label: 'RED',
-                                      score: _total('red'),
+                                      score: _total('red'), // live if available
                                       color: Colors.red.shade700,
                                     ),
                                   ),
@@ -418,7 +516,7 @@ class _MatchSummaryPageState extends State<MatchSummaryPage> {
                                   Expanded(
                                     child: _scorePillar(
                                       label: 'BLUE',
-                                      score: _total('blue'),
+                                      score: _total('blue'), // live if available
                                       color: Colors.lightBlue.shade400,
                                     ),
                                   ),
