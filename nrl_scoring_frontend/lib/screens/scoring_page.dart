@@ -84,6 +84,16 @@ class _ScoringPageState extends State<ScoringPage> {
   bool _loadingDetails = true;
   bool _submitting = false;
 
+  // ===== Synced Match Timer (2:30) =====
+  int gameSecondsLeft = 150;
+  bool gameRunning = false;
+  Timer? gameTimer;
+
+  // server sync for match timer
+  int? matchStartMs;             // server start time (ms)
+  int matchTimerDuration = 150;  // seconds
+  int timeOffsetMs = 0;          // server_now_ms - client_now_ms
+
   // ===== Golden constants & helpers =====
   static const int kGoldenBase = 10;      // 10 per block
   static const int kGoldenStackBonus = 5; // +5 per level above bottom
@@ -121,23 +131,120 @@ class _ScoringPageState extends State<ScoringPage> {
     return pts;
   }
 
+  // ===== Match Timer helpers =====
+  int _computeRemainingSec() {
+    if (matchStartMs == null) return matchTimerDuration;
+    final clientNow = DateTime.now().millisecondsSinceEpoch;
+    final serverAlignedNow = clientNow + timeOffsetMs;
+    final elapsedMs = serverAlignedNow - matchStartMs!;
+    final elapsedSec = (elapsedMs / 1000).floor();
+    final remaining = matchTimerDuration - elapsedSec;
+    return remaining.clamp(0, matchTimerDuration);
+  }
+
+  void _startLocalCountdownFromServer() {
+    gameTimer?.cancel();
+    setState(() {
+      gameSecondsLeft = _computeRemainingSec();
+      gameRunning = gameSecondsLeft > 0;
+    });
+
+    if (!gameRunning) return;
+    gameTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      final left = _computeRemainingSec();
+      if (left <= 0) {
+        t.cancel();
+        setState(() {
+          gameSecondsLeft = 0;
+          gameRunning = false;
+          matchEnded = true;         // Allow post-match behaviors
+          superchargeActive = false; // Stop supercharge if it was running
+          superchargeSecondsLeft = 0;
+        });
+        _showSnack('Time up!');
+      } else {
+        setState(() {
+          gameSecondsLeft = left;
+        });
+      }
+    });
+  }
+
+  Future<void> _fetchTimerState() async {
+    try {
+      final res = await http.get(Uri.parse('$baseUrl/match/${widget.matchId}/timer/state'));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        final serverNow = (data['server_now_ms'] ?? 0) as int;
+        final clientNow = DateTime.now().millisecondsSinceEpoch;
+        timeOffsetMs = serverNow - clientNow;
+
+        final running = data['running'] == true;
+        final start = data['start_ms'] as int?;
+        final dur = (data['duration'] ?? 150) as int;
+
+        setState(() {
+          matchStartMs = start;
+          matchTimerDuration = dur;
+        });
+
+        if (running && start != null) {
+          _startLocalCountdownFromServer();
+        } else {
+          gameTimer?.cancel();
+          setState(() {
+            gameRunning = false;
+            gameSecondsLeft = dur;
+          });
+        }
+      }
+    } catch (_) {
+      // ignore, soft-fail
+    }
+  }
+
+  Future<void> _apiStartMatchTimer() async {
+    if (_finalised) return;
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/match/${widget.matchId}/timer/start'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'duration': 150}),
+      );
+      if (res.statusCode != 200) {
+        _showSnack('Start timer failed (${res.statusCode})');
+      }
+      // We rely on socket 'match_timer_started' to sync everyone.
+    } catch (_) {
+      _showSnack('Network error starting timer.');
+    }
+  }
+
+  String _fmt(int totalSec) {
+    final m = (totalSec ~/ 60).toString().padLeft(2, '0');
+    final s = (totalSec % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
   // ===== Lifecycle =====
   @override
   void initState() {
     super.initState();
     goldenGrid = List.generate(goldRows, (_) => List.generate(goldCols, (_) => false));
     _loadMatchDetails();
-    _connectSocket(); // <--- live sync
+    _connectSocket(); // <--- live sync (scores + timer events)
+    _fetchTimerState(); // <--- pick up any running timer
   }
 
   @override
   void dispose() {
     superchargeTimer?.cancel();
-    // NEW: leave match room and cleanup debounce
+    // leave match room and cleanup debounce
     try {
-      _socket?.emit('leave_match', {'match_id': widget.matchId}); // NEW
+      _socket?.emit('leave_match', {'match_id': widget.matchId}); // harmless if server ignores
     } catch (_) {}
-    _liveDebounce?.cancel(); // NEW
+    _liveDebounce?.cancel();
+    gameTimer?.cancel();
     _socket?.dispose();
     super.dispose();
   }
@@ -154,8 +261,8 @@ class _ScoringPageState extends State<ScoringPage> {
 
     _socket!.onConnect((_) {
       debugPrint('Socket connected');
-      // NEW: Join this match room so we only receive events for the same match
-      _socket!.emit('join_match', {'match_id': widget.matchId}); // NEW
+      // Join this match room so we only receive events for the same match (harmless if server ignores)
+      _socket!.emit('join_match', {'match_id': widget.matchId});
     });
 
     _socket!.onDisconnect((_) => debugPrint('Socket disconnected'));
@@ -168,7 +275,6 @@ class _ScoringPageState extends State<ScoringPage> {
 
         final alliance = (data['alliance'] ?? '').toString();
         final total = data['total_score'] as int?;
-        // final sb = data['score_breakdown'] as Map?; // not used here, but available
 
         setState(() {
           if (alliance == 'red') {
@@ -195,11 +301,44 @@ class _ScoringPageState extends State<ScoringPage> {
       } catch (_) {}
     });
 
+    // ===== MATCH TIMER EVENTS =====
+    _socket!.on('match_timer_started', (data) {
+      try {
+        if (data == null) return;
+        if (data['match_id'] != widget.matchId) return;
+
+        final serverNow = (data['server_now_ms'] ?? 0) as int;
+        final clientNow = DateTime.now().millisecondsSinceEpoch;
+        timeOffsetMs = serverNow - clientNow;
+
+        matchStartMs = (data['start_ms'] ?? 0) as int;
+        matchTimerDuration = (data['duration'] ?? 150) as int;
+
+        _startLocalCountdownFromServer();
+      } catch (_) {}
+    });
+
+    _socket!.on('match_timer_reset', (data) {
+      try {
+        if (data == null) return;
+        if (data['match_id'] != widget.matchId) return;
+
+        gameTimer?.cancel();
+        setState(() {
+          matchStartMs = null;
+          gameRunning = false;
+          gameSecondsLeft = 150;
+          matchTimerDuration = 150;
+          // Don’t wipe scores here; Reset button already does that for this client.
+        });
+      } catch (_) {}
+    });
+
     _socket!.connect();
   }
 
-  // NEW: Build live payload for socket emit
-  Map<String, dynamic> _buildLivePayload() { // NEW
+  // Build live payload for socket emit
+  Map<String, dynamic> _buildLivePayload() {
     return {
       'alliance_charge': allianceCharge,
       'captured_charge': capturedCharge,
@@ -214,8 +353,8 @@ class _ScoringPageState extends State<ScoringPage> {
     };
   }
 
-  // NEW: Emit live update immediately
-  void _broadcastLive() { // NEW
+  // Emit live update immediately
+  void _broadcastLive() {
     if (_socket?.connected != true) return;
     _socket!.emit('live_score_update', {
       'match_id': widget.matchId,
@@ -224,8 +363,8 @@ class _ScoringPageState extends State<ScoringPage> {
     });
   }
 
-  // NEW: Debounce broadcasts to avoid spamming while tapping fast
-  void _scheduleLiveBroadcast() { // NEW
+  // Debounce broadcasts to avoid spamming while tapping fast
+  void _scheduleLiveBroadcast() {
     _liveDebounce?.cancel();
     _liveDebounce = Timer(const Duration(milliseconds: 200), _broadcastLive);
   }
@@ -315,7 +454,7 @@ class _ScoringPageState extends State<ScoringPage> {
       superchargeActive = true;
       superchargeSecondsLeft = 15;
     });
-    _scheduleLiveBroadcast(); // NEW
+    _scheduleLiveBroadcast();
 
     superchargeTimer?.cancel();
     superchargeTimer = Timer.periodic(const Duration(seconds: 1), (t) {
@@ -325,10 +464,10 @@ class _ScoringPageState extends State<ScoringPage> {
           superchargeActive = false;
           superchargeSecondsLeft = 0;
         });
-        _scheduleLiveBroadcast(); // NEW
+        _scheduleLiveBroadcast();
       } else {
         setState(() => superchargeSecondsLeft--);
-        _scheduleLiveBroadcast(); // NEW
+        _scheduleLiveBroadcast();
       }
     });
   }
@@ -340,7 +479,7 @@ class _ScoringPageState extends State<ScoringPage> {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Reset match inputs?'),
-        content: const Text('This will clear all counters on this screen.'),
+        content: const Text('This will clear all counters on this screen and reset the match timer.'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
           ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Reset')),
@@ -349,7 +488,16 @@ class _ScoringPageState extends State<ScoringPage> {
     );
 
     if (ok == true) {
+      // Reset the global timer for both referees (server authoritative)
+      try {
+        await http.post(Uri.parse('$baseUrl/match/${widget.matchId}/timer/reset'));
+      } catch (_) {
+        // ignore; socket will re-sync if reachable
+      }
+
       superchargeTimer?.cancel();
+      gameTimer?.cancel();
+
       setState(() {
         allianceCharge = 0;
         capturedCharge = 0;
@@ -363,8 +511,14 @@ class _ScoringPageState extends State<ScoringPage> {
         superchargeSecondsLeft = 0;
         matchEnded = false;
         goldenGrid = List.generate(goldRows, (_) => List.generate(goldCols, (_) => false));
+
+        // local clock defaults; socket reset event already updates too
+        matchStartMs = null;
+        matchTimerDuration = 150;
+        gameSecondsLeft = 150;
+        gameRunning = false;
       });
-      _scheduleLiveBroadcast(); // NEW
+      _scheduleLiveBroadcast();
     }
   }
 
@@ -420,6 +574,40 @@ class _ScoringPageState extends State<ScoringPage> {
   }
 
   // ===== Small builders =====
+
+  // NEW: Synced Match Timer Bar (top of screen)
+  Widget _gameTimerBar() {
+    final timeText = _fmt(gameSecondsLeft);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            Icon(Icons.timer, color: Colors.grey.shade700),
+            const SizedBox(width: 8),
+            Text('Match Timer',
+                style: TextStyle(fontWeight: FontWeight.w700, color: Colors.grey.shade800)),
+            const Spacer(),
+            Text(
+              timeText,
+              style: TextStyle(
+                fontWeight: FontWeight.w900,
+                fontSize: 22,
+                color: gameRunning ? Colors.green.shade700 : Colors.grey.shade700,
+              ),
+            ),
+            const SizedBox(width: 12),
+            ElevatedButton.icon(
+              onPressed: (gameRunning || _finalised) ? null : _apiStartMatchTimer,
+              icon: const Icon(Icons.play_arrow),
+              label: const Text('Start Game'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _liveScoreBar() {
     final redTotal = liveRedTotal?.toString() ?? '—';
     final blueTotal = liveBlueTotal?.toString() ?? '—';
@@ -522,7 +710,7 @@ class _ScoringPageState extends State<ScoringPage> {
                   onSelected: _finalised ? null : (v) => setState(() {
                     fullParking = v;
                     if (v) partialParking = false;
-                    _scheduleLiveBroadcast(); // NEW
+                    _scheduleLiveBroadcast();
                   }),
                   label: const Text('Full'),
                 ),
@@ -531,7 +719,7 @@ class _ScoringPageState extends State<ScoringPage> {
                   onSelected: _finalised ? null : (v) => setState(() {
                     partialParking = v;
                     if (v) fullParking = false;
-                    _scheduleLiveBroadcast(); // NEW
+                    _scheduleLiveBroadcast();
                   }),
                   label: const Text('Partial'),
                 ),
@@ -567,10 +755,10 @@ class _ScoringPageState extends State<ScoringPage> {
                           setState(() {
                             if (_canPlaceAt(r, c)) {
                               goldenGrid[r][c] = true;
-                              _scheduleLiveBroadcast(); // NEW
+                              _scheduleLiveBroadcast();
                             } else if (_canRemoveAt(r, c)) {
                               goldenGrid[r][c] = false;
-                              _scheduleLiveBroadcast(); // NEW
+                              _scheduleLiveBroadcast();
                             } else {
                               _showSnack('Place from bottom up • Remove from top down in each column.');
                             }
@@ -625,7 +813,7 @@ class _ScoringPageState extends State<ScoringPage> {
                   Row(
                     children: [
                       ElevatedButton.icon(
-                        onPressed: superchargeActive || _finalised ? null : () { _toggleSupercharge(); _scheduleLiveBroadcast(); }, // NEW
+                        onPressed: superchargeActive || _finalised ? null : () { _toggleSupercharge(); _scheduleLiveBroadcast(); },
                         icon: const Icon(Icons.flash_on),
                         label: const Text('Activate (15s)'),
                       ),
@@ -640,7 +828,7 @@ class _ScoringPageState extends State<ScoringPage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       ElevatedButton.icon(
-                        onPressed: superchargeActive || _finalised ? null : () { _toggleSupercharge(); _scheduleLiveBroadcast(); }, // NEW
+                        onPressed: superchargeActive || _finalised ? null : () { _toggleSupercharge(); _scheduleLiveBroadcast(); },
                         icon: const Icon(Icons.flash_on),
                         label: const Text('Activate (15s)'),
                       ),
@@ -693,6 +881,9 @@ class _ScoringPageState extends State<ScoringPage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      // ===== Synced Match Timer (TOP) =====
+                      _gameTimerBar(),
+
                       // ===== Live score bar (both alliances) =====
                       _liveScoreBar(),
 
@@ -747,30 +938,30 @@ class _ScoringPageState extends State<ScoringPage> {
                             _countRow(
                               label: 'Alliance Charge',
                               value: allianceCharge,
-                              onInc: () => setState(() { allianceCharge++; _scheduleLiveBroadcast(); }), // NEW
+                              onInc: () => setState(() { allianceCharge++; _scheduleLiveBroadcast(); }),
                               onDec: () => setState(() {
                                 if (allianceCharge > 0) allianceCharge--;
-                                _scheduleLiveBroadcast(); // NEW
+                                _scheduleLiveBroadcast();
                               }),
                               trailingText: 'per press: ${_allianceChargePerPress()} pts',
                             ),
                             _countRow(
                               label: 'Minor Penalty',
                               value: minorPenalties,
-                              onInc: () => setState(() { minorPenalties++; _scheduleLiveBroadcast(); }), // NEW
+                              onInc: () => setState(() { minorPenalties++; _scheduleLiveBroadcast(); }),
                               onDec: () => setState(() {
                                 if (minorPenalties > 0) minorPenalties--;
-                                _scheduleLiveBroadcast(); // NEW
+                                _scheduleLiveBroadcast();
                               }),
                               trailingText: '$kMinorPenalty each',
                             ),
                             _countRow(
                               label: 'Major Penalty',
                               value: majorPenalties,
-                              onInc: () => setState(() { majorPenalties++; _scheduleLiveBroadcast(); }), // NEW
+                              onInc: () => setState(() { majorPenalties++; _scheduleLiveBroadcast(); }),
                               onDec: () => setState(() {
                                 if (majorPenalties > 0) majorPenalties--;
-                                _scheduleLiveBroadcast(); // NEW
+                                _scheduleLiveBroadcast();
                               }),
                               trailingText: '$kMajorPenalty each',
                             ),
@@ -784,20 +975,20 @@ class _ScoringPageState extends State<ScoringPage> {
                             _countRow(
                               label: 'Dock on Charge Station',
                               value: docked,
-                              onInc: () => setState(() { docked++; _scheduleLiveBroadcast(); }), // NEW
+                              onInc: () => setState(() { docked++; _scheduleLiveBroadcast(); }),
                               onDec: () => setState(() {
                                 if (docked > 0) docked--;
-                                _scheduleLiveBroadcast(); // NEW
+                                _scheduleLiveBroadcast();
                               }),
                               trailingText: '$kDock each',
                             ),
                             _countRow(
                               label: 'Engage with Station',
                               value: engaged,
-                              onInc: () => setState(() { engaged++; _scheduleLiveBroadcast(); }), // NEW
+                              onInc: () => setState(() { engaged++; _scheduleLiveBroadcast(); }),
                               onDec: () => setState(() {
                                 if (engaged > 0) engaged--;
-                                _scheduleLiveBroadcast(); // NEW
+                                _scheduleLiveBroadcast();
                               }),
                               trailingText: '$kEngage each',
                             ),
@@ -815,14 +1006,14 @@ class _ScoringPageState extends State<ScoringPage> {
                                       label: 'Count',
                                       value: capturedCharge,
                                       onInc: superchargeActive && !_finalised
-                                          ? () => setState(() { capturedCharge++; _scheduleLiveBroadcast(); }) // NEW
+                                          ? () => setState(() { capturedCharge++; _scheduleLiveBroadcast(); })
                                           : () {},
                                       onDec: () {
                                         if (_finalised) return;
                                         if (!matchEnded && !superchargeActive) return;
                                         setState(() {
                                           if (capturedCharge > 0) capturedCharge--;
-                                          _scheduleLiveBroadcast(); // NEW
+                                          _scheduleLiveBroadcast();
                                         });
                                       },
                                       decEnabled: (superchargeActive || matchEnded) && !_finalised,

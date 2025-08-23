@@ -7,6 +7,12 @@ import csv
 from io import StringIO
 import json
 from flask_socketio import SocketIO, join_room, leave_room, emit
+import time  # <-- ADD
+
+# In-memory match timer state (no DB migration required)
+# Structure: { match_id: {'start_ms': int, 'duration': int, 'running': bool} }
+MATCH_TIMERS = {}  # <-- ADD
+
 
 
 # -----------------------------
@@ -35,6 +41,16 @@ def hash_password(password: str) -> str:
 def get_by_id(model, pk):
     """SQLAlchemy 2.x style Session.get wrapper."""
     return db.session.get(model, pk)
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+def get_timer_state(match_id: int):
+    st = MATCH_TIMERS.get(match_id)
+    if not st:
+        return {'running': False, 'duration': 150, 'start_ms': None}
+    return st
+
 
 # -----------------------------
 # Models
@@ -197,6 +213,66 @@ def get_matches():
             } for m in matches
         ]
     }), 200
+
+@app.route('/match/<int:match_id>/timer/start', methods=['POST'])
+def start_match_timer(match_id):
+    # Optional: check match exists
+    match = get_by_id(Match, match_id)
+    if not match:
+        return jsonify({'error': 'Match not found'}), 404
+
+    data = request.json or {}
+    duration = int(data.get('duration', 150))  # seconds
+    # If already running, just re-broadcast current (idempotent)
+    st = get_timer_state(match_id)
+    if st.get('running'):
+        payload = {
+            'match_id': match_id,
+            'start_ms': st['start_ms'],
+            'duration': st['duration'],
+            'server_now_ms': now_ms(),
+        }
+        socketio.emit('match_timer_started', payload)
+        return jsonify({'message': 'Timer already running', **payload}), 200
+
+    start = now_ms()
+    MATCH_TIMERS[match_id] = {'start_ms': start, 'duration': duration, 'running': True}
+
+    payload = {
+        'match_id': match_id,
+        'start_ms': start,
+        'duration': duration,
+        'server_now_ms': now_ms(),
+    }
+    socketio.emit('match_timer_started', payload)
+    return jsonify({'message': 'Timer started', **payload}), 200
+
+
+@app.route('/match/<int:match_id>/timer/reset', methods=['POST'])
+def reset_match_timer(match_id):
+    # Optional: check match exists
+    match = get_by_id(Match, match_id)
+    if not match:
+        return jsonify({'error': 'Match not found'}), 404
+
+    # Clear state (or mark not running)
+    MATCH_TIMERS.pop(match_id, None)
+    payload = {'match_id': match_id, 'server_now_ms': now_ms()}
+    socketio.emit('match_timer_reset', payload)
+    return jsonify({'message': 'Timer reset', **payload}), 200
+
+
+@app.route('/match/<int:match_id>/timer/state', methods=['GET'])
+def timer_state(match_id):
+    st = get_timer_state(match_id)
+    return jsonify({
+        'match_id': match_id,
+        'running': bool(st.get('running')),
+        'start_ms': st.get('start_ms'),
+        'duration': st.get('duration', 150),
+        'server_now_ms': now_ms(),
+    }), 200
+
 
 # -----------------------------
 # Golden points helpers
